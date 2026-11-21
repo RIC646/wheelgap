@@ -467,7 +467,7 @@ path as given, the `line` it is about (or `null`), a `kind` to match on and the 
 The kinds: `image-not-read` (`-p` and `-t` stood in for an [image wheelgap can't read](cli.md#dockerfile));
 `passed-over:CLASS`, one per class of `RUN` line [`--dockerfile-inputs`](cli.md#dockerfile-inputs) didn't read
 because it installs no Python packages with pip or uv (`system-packages`, `shell`, `programs`, `venv`,
-`cache-mounts`, `installer-tools`), with `line` `null` and the line numbers in `lines`; and `arg-unset` (an
+`cache-mounts`, `copy-from`, `installer-tools`), with `line` `null` and the line numbers in `lines`; and `arg-unset` (an
 `ARG PIP_...` with no default, read as unset). The key is absent when there is nothing to say.
 
 `dockerfile_packages` (after 0.13.0) has one entry per `RUN` line whose `pip install` names requirements on the
@@ -477,7 +477,7 @@ replaced. The line is also a source of its own in `sources` (`Dockerfile:5`). `k
 
 `dockerfile_warnings` (after 0.13.0, always there with `--dockerfile-inputs`) lists the `RUN` lines wheelgap
 couldn't see into, which may install Python packages the answer doesn't have: `dockerfile`, `line`, `kind`
-(`may-install`) and `message`. An empty list means every line was read or can't install any; a script should treat a
+(`may-install`, or `may-bring` for a `COPY --from` that may carry an environment from another stage) and `message`. An empty list means every line was read or can't install any; a script should treat a
 non-empty one as "this answer is not the whole image".
 
 `results`, `rejected` and `via` are all keyed by target label: just the platform (`"linux-x86_64"`) when one Python is

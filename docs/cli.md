@@ -290,9 +290,10 @@ your user-level uv config, so with a private index there, use a lockfile. A lock
 ### `--online` {#online}
 
 Re-check lockfile packages against PyPI instead of trusting the files the lockfile lists, for when a project has
-uploaded new wheels for an existing version since you locked, or a `uv.lock` was made with `environments`
-restrictions. Packages the lock says came from another index keep their locked files, so their names are never sent
-to PyPI. Can't be combined with `--offline`.
+uploaded new wheels for an existing version since you locked. Packages the lock says came from another index keep
+their locked files, so their names are never sent to PyPI. Can't be combined with `--offline`. It doesn't make a
+`uv.lock` limited by `[tool.uv] environments` checkable on other platforms: [such a lock](inputs.md#uvlock) leaves
+out whole packages, not only wheels.
 
 ### `--offline` {#offline}
 

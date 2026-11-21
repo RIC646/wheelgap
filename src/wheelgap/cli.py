@@ -33,9 +33,11 @@ from .check import (
     Row,
     Status,
     check,
+    check_lock_environments,
     dropped_targets,
     explain,
     explain_lines,
+    lock_environment_targets,
     marker_holds,
     reachable,
 )
@@ -2010,6 +2012,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 if any(p.startswith("musl-") for p in platforms):
                     note += "; Linux markers select both glibc and musl targets"
                 print(note, file=sys.stderr)
+        default_platforms = not platforms
         targets = build_targets(
             pythons,
             platforms,
@@ -2085,8 +2088,26 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 "uv.lock (not a script's), one requirements file or package names on the command line "
                 "(--fix alone covers the others)"
             )
+        if default_platforms:
+            # Nobody asked for these platforms, so a uv.lock made with [tool.uv] environments is checked on the
+            # default platforms it was locked for. One it covers for some of the Pythons only stays, and is an
+            # error below, as a platform that was asked for is.
+            unlocked = [target for source in sources for target in lock_environment_targets(source, targets)[0]]
+            locked = {t.platform for t in targets if t not in unlocked}
+            left_out = list(dict.fromkeys(t.platform for t in targets if t.platform not in locked))
+            if locked and left_out:
+                if not quiet:
+                    print(
+                        f"wheelgap: note: {', '.join(s.label for s in sources if s.supported_markers)} is locked "
+                        f"for `[tool.uv] environments` only, which leave out {', '.join(left_out)}: checking the "
+                        f"default targets it covers ({', '.join(p for p in DEFAULT_PLATFORMS if p in locked)})",
+                        file=sys.stderr,
+                    )
+                targets = [t for t in targets if t.platform in locked]
+                advisory = frozenset(t for t in advisory if t.platform in locked)
         for source in sources:
             check_report_targets(source, targets)
+            check_lock_environments(source, targets)
             if source.passed_over is not None and not quiet:
                 print(
                     f"wheelgap: note: {source.path} was checked; {source.passed_over} is in the same folder too "

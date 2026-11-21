@@ -1418,6 +1418,141 @@ def test_lock_inside_requires_python_stays_offline(capsys, fake_pypi, tmp_path):
     assert fake_pypi == []
 
 
+def environments_lock(*markers):
+    """A uv.lock as uv writes it for `[tool.uv] environments = [markers]`: the wheels for other platforms are left
+    out (uv 0.13.1 keeps only the Linux x86_64 ones for the first marker in LINUX_ONLY)."""
+    supported = "supported-markers = [\n" + "".join(f"    {json.dumps(m)},\n" for m in markers) + "]\n"
+    return LOCK_312_ONLY.replace('"==3.12.*"\n', '">=3.12"\n' + supported)
+
+
+LINUX_ONLY = ("platform_machine == 'x86_64' and sys_platform == 'linux'",)
+
+
+def test_lock_environments_refuse_a_target_outside_them(capsys, fake_pypi, tmp_path):
+    # Without the check, win-amd64 would read `source`: a gap that only says the lock left Windows out.
+    (tmp_path / "uv.lock").write_text(environments_lock(*LINUX_ONLY), encoding="utf-8")
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.12", "-t", "linux-x86_64,win-amd64,macos-arm64")
+    assert code == 2 and out == ""
+    assert "uv.lock: this lock doesn't cover win-amd64, macos-arm64: it was locked for `[tool.uv] environments`" in err
+    assert "(platform_machine == 'x86_64' and sys_platform == 'linux'), so `uv sync` fails there" in err
+    assert "of the targets asked for it covers linux-x86_64 (" in err
+    assert fake_pypi == []
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.12", "-t", "win-amd64", "--json")
+    assert code == 2 and "it covers none of the targets asked for" in err
+    assert "this lock doesn't cover win-amd64" in json.loads(out)["error"]["message"]
+    # --online looks the locked packages up again, but not the ones the lock left out.
+    assert run(capsys, str(tmp_path), "-p", "3.12", "-t", "win-amd64", "--online")[0] == 2
+
+
+def test_lock_environments_in_a_lock_uv_wrote(capsys, fake_pypi, fixtures):
+    code, out, err = run(capsys, str(fixtures / "uvenvironments"), "-p", "3.13", "--json")
+    data = json.loads(out)
+    assert code == 0 and [t["platform"] for t in data["targets"]] == ["linux-x86_64"]
+    assert "which leave out linux-aarch64, macos-arm64, win-amd64: checking the default targets it covers" in err
+    assert [(p["name"], p["results"]) for p in data["packages"]] == [("markupsafe", {"linux-x86_64": "wheel"})]
+    assert fake_pypi == []
+
+
+def test_lock_environments_leave_covered_targets_alone(capsys, fake_pypi, tmp_path):
+    answers = []
+    for lock in (environments_lock(*LINUX_ONLY), environments_lock()):  # the second has no limit
+        (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+        code, out, err = run(capsys, str(tmp_path), "-p", "3.12", "-t", "linux-x86_64", "--json")
+        assert code == 0 and "note:" not in err
+        answers.append(json.loads(out))
+    assert answers[0] == answers[1]
+    assert answers[0]["packages"][0]["results"] == {"linux-x86_64": "wheel"}
+
+
+def test_lock_environments_narrow_the_default_targets(capsys, fake_pypi, tmp_path):
+    (tmp_path / "uv.lock").write_text(environments_lock("sys_platform == 'linux'"), encoding="utf-8")
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.12", "--json")
+    assert [t["platform"] for t in json.loads(out)["targets"]] == ["linux-x86_64", "linux-aarch64"]
+    assert (
+        "wheelgap: note: uv.lock is locked for `[tool.uv] environments` only, which leave out macos-arm64, "
+        "win-amd64: checking the default targets it covers (linux-x86_64, linux-aarch64)\n"
+    ) in err
+    assert code == 1  # the lock's own gap on linux-aarch64 still counts
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.12", "--json", "-q")
+    assert [t["platform"] for t in json.loads(out)["targets"]] == ["linux-x86_64", "linux-aarch64"] and err == ""
+    # The same platforms asked for by name are an error, and so is a lock that covers no default target.
+    assert run(capsys, str(tmp_path), "-p", "3.12", "-t", ",".join(DEFAULT_PLATFORMS))[0] == 2
+    (tmp_path / "uv.lock").write_text(environments_lock("sys_platform == 'emscripten'"), encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", "3.12")
+    assert code == 2 and "it covers none of the targets asked for" in err and "note:" not in err
+
+
+def test_lock_environments_narrowing_keeps_advisory_targets(capsys, fake_pypi, tmp_path):
+    (tmp_path / "uv.lock").write_text(environments_lock("sys_platform == 'linux'"), encoding="utf-8")
+    code, out, _ = run(capsys, str(tmp_path), "-p", "3.12", "--json", "--advisory", "linux-aarch64,win-amd64")
+    assert code == 0 and json.loads(out)["advisory"] == ["linux-aarch64"]
+
+
+@pytest.mark.parametrize(
+    "marker,python,covered",
+    [
+        ("python_full_version < '3.14' and sys_platform == 'linux'", "3.13", True),
+        ("python_full_version < '3.14' and sys_platform == 'linux'", "3.14", False),
+        ("python_full_version >= '3.14'", "3.13", False),
+        ("python_full_version >= '3.14'", "3.14t", True),
+        ("platform_python_implementation == 'CPython'", "3.13", True),
+        ("platform_python_implementation == 'PyPy'", "3.13", False),
+        ("implementation_name == 'cpython' and os_name == 'posix'", "3.13", True),
+        ("platform_machine == 'aarch64'", "3.13", False),
+        ("sys_platform != 'emscripten'", "3.13", True),
+        ("(sys_platform == 'darwin' or sys_platform == 'linux') and python_version < '3.14'", "3.13", True),
+    ],
+)
+def test_lock_environment_markers_are_evaluated_for_the_target(capsys, fake_pypi, tmp_path, marker, python, covered):
+    (tmp_path / "uv.lock").write_text(environments_lock(marker), encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", python, "-t", "linux-x86_64")
+    assert ("this lock doesn't cover linux-x86_64" in err) is not covered
+    assert (code == 2) is not covered
+
+
+def test_lock_environments_cover_a_target_if_any_marker_holds(capsys, fake_pypi, tmp_path):
+    lock = environments_lock("sys_platform == 'win32'", "sys_platform == 'linux'")
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", "3.12,3.13", "-t", "linux-x86_64,win-amd64,macos-arm64")
+    assert code == 2 and "this lock doesn't cover 3.12 macos-arm64, 3.13 macos-arm64: " in err
+    assert "it covers 3.12 linux-x86_64, 3.12 win-amd64, 3.13 linux-x86_64, 3.13 win-amd64 (" in err
+
+
+def test_lock_environments_cover_a_default_platform_for_some_pythons_only(capsys, fake_pypi, tmp_path):
+    # Python 3.14 was asked for, so leaving it out quietly would hide that `uv sync` fails there.
+    lock = environments_lock("python_full_version < '3.14' and sys_platform == 'linux'")
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", "3.13,3.14")
+    assert code == 2 and "which leave out macos-arm64, win-amd64: checking" in err
+    assert "this lock doesn't cover 3.14 linux-x86_64, 3.14 linux-aarch64: " in err
+
+
+@pytest.mark.parametrize(
+    "marker,target",
+    [
+        ("platform_release == '6.1'", "linux-x86_64"),  # nothing a target fixes
+        ("platform_machine == 'AMD64'", "win32"),  # 32-bit Python on 64-bit Windows says AMD64 or ARM64
+        ("python_full_version >= '3.12.4'", "linux-x86_64"),  # 3.12.0 no, 3.12.9 yes
+        ("not a marker", "linux-x86_64"),
+    ],
+)
+def test_lock_environments_that_a_target_cannot_decide_are_not_guessed(capsys, fake_pypi, tmp_path, marker, target):
+    (tmp_path / "uv.lock").write_text(environments_lock(marker), encoding="utf-8")
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.12", "-t", target)
+    assert code == 2 and out == ""
+    assert f"uv.lock: can't tell whether this lock covers {target}: it was locked for" in err
+    # A marker that does hold settles it, whatever the others say.
+    (tmp_path / "uv.lock").write_text(environments_lock(marker, "os_name != 'java'"), encoding="utf-8")
+    assert run(capsys, str(tmp_path), "-p", "3.12", "-t", target)[0] != 2
+
+
+def test_lock_environments_must_be_a_list_of_markers(capsys, tmp_path):
+    lock = LOCK_312_ONLY.replace("version = 1\n", "version = 1\nsupported-markers = \"sys_platform == 'linux'\"\n", 1)
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", "3.12", "-t", "linux-x86_64")
+    assert code == 2 and "uv.lock: `supported-markers` isn't a list of strings" in err
+
+
 def test_failed_recheck_keeps_the_lock_answers(capsys, tmp_path, monkeypatch):
     import urllib.error
 

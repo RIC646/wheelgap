@@ -160,6 +160,10 @@ class Source:
     root_groups: dict[int, str] = field(default_factory=dict)
     # uv.lock only: the project's requires-python. uv keeps only the wheels that can serve it.
     requires_python: str | None = None
+    # uv.lock only: its supported-markers, the project's [tool.uv] environments. When there are any, uv locked
+    # for those environments only: `uv sync` fails anywhere else, and the lock leaves out the packages and wheels
+    # that only other environments need (see check.check_lock_environments).
+    supported_markers: list[str] = field(default_factory=list)
     # Scripts and pyproject.toml: uv's exclude-newer (#521). A file uploaded at or after the cutoff isn't installed;
     # exclude-newer-package gives the packages it names their own cutoff, or none (uv's `false`: None here).
     exclude_newer: datetime | None = None
@@ -663,6 +667,10 @@ def parse_uv_lock(path: Path) -> Source:
         source.edges = None  # no idea where the graph starts; treat every package as needed
     if isinstance(data.get("requires-python"), str):
         source.requires_python = data["requires-python"]
+    supported = data.get("supported-markers", [])
+    if not isinstance(supported, list) or not all(isinstance(marker, str) for marker in supported):
+        raise SourceError(f"{path.name}: `supported-markers` isn't a list of strings")
+    source.supported_markers = supported
     return source
 
 

@@ -164,6 +164,10 @@ the built-in defaults, and so does one matching none of the targets above (with 
 error. Only `required-environments` is used here: `environments`, extra Linux architectures, mobile and Pyodide
 targets are not inferred.
 
+`[tool.uv] environments` doesn't pick targets, but it limits them (after 0.13.0): a `uv.lock` made with it covers
+those environments only, so the built-in defaults are narrowed to the ones it covers and a target you ask for outside
+them is an error. See [uv.lock](inputs.md#uvlock).
+
 ### From a Dockerfile
 
 `--dockerfile PATH` takes the Python, the platform and the glibc or musl version from the image of the Dockerfile's

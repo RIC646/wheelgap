@@ -51,7 +51,7 @@ from .dockerfile import (
     dockerfile_requirements,
     read_dockerfile,
 )
-from .github import github_annotations
+from .github import github_annotations, relative_path, workflow_command
 from .install_log import failed_builds, log_source, read_log
 from .junit import write_junit
 from .logsafe import guarded_output, write_command
@@ -1203,6 +1203,29 @@ def dockerfile_report_notes(
     return notes, warnings, unseen
 
 
+# The dockerfile_notes kinds that qualify the whole answer (what the image is), shown in every output: --markdown,
+# --github-annotations and --sarif as well as stderr and --json.
+IMAGE_NOTE_KINDS = ("image-not-read", "image-libc")
+
+
+def dockerfile_results(notes: list[dict[str, object]]) -> list[tuple[str, str, int | None, str]]:
+    """(level, Dockerfile, line, message) for each Dockerfile note that every output shows."""
+    return [
+        ("note", str(note["dockerfile"]), note["line"] if isinstance(note["line"], int) else None, str(note["message"]))
+        for note in notes
+        if note["kind"] in IMAGE_NOTE_KINDS
+    ]
+
+
+def dockerfile_markdown(results: list[tuple[str, str, int | None, str]]) -> list[str]:
+    """--markdown's lines for dockerfile_results: a quoted line each, after the report."""
+    lines = []
+    for level, file, line, message in results:
+        where = file if line is None else f"{file}:{line}"
+        lines += ["", f"> **{level.capitalize()}:** {_md(where)}: {_md(message)}"]
+    return lines
+
+
 def libc_versions(args: argparse.Namespace, config: dict) -> tuple[str, str]:
     """CLI libc > CLI distro > Dockerfile/config libc > config distro > built-ins."""
     defaults = {}
@@ -2077,8 +2100,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 reason = str(unknown_image).removeprefix(f"{args.dockerfile}: ").removesuffix(", pass -p/-t instead")
                 message = (
                     f"the final image isn't read ({reason}), so this run checks the -p and -t given. Not known from "
-                    "the Dockerfile: which Python the image's pip installs for, its glibc or musl version"
-                    f"{libc}, and the packages the image already has"
+                    "the Dockerfile: which Python the image's pip installs for and which pip version it has, its "
+                    f"glibc or musl version{libc}, the packages the image already has, its own pip settings "
+                    "(ENV PIP_..., a pip.conf, a constraints file) and any ONBUILD instructions it runs in this build"
                 )
                 where = args.dockerfile if unknown_image.line is None else f"{args.dockerfile}:{unknown_image.line}"
                 print(f"wheelgap: note: {where}: {message}", file=sys.stderr)
@@ -2159,6 +2183,23 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             args.ios or config.get("ios", DEFAULT_IOS),
             args.android_api or config.get("android-api", DEFAULT_ANDROID_API),
         )
+        if unknown_image is not None and (image_tag := unknown_image.image) and re.search(r"alpine|musl", image_tag):
+            if glibc_targets := [t.platform for t in targets if t.platform.startswith("linux-")]:
+                # The tag isn't read, but it says musl: glibc targets are likely not what the image installs for.
+                message = (
+                    f"{image_tag} looks like an Alpine (musl) image, and glibc targets are checked "
+                    f"({', '.join(dict.fromkeys(glibc_targets))}): pass -t musl-... if the image uses musl"
+                )
+                where = args.dockerfile if unknown_image.line is None else f"{args.dockerfile}:{unknown_image.line}"
+                print(f"wheelgap: note: {where}: {message}", file=sys.stderr)
+                dockerfile_notes.append(
+                    {
+                        "dockerfile": args.dockerfile,
+                        "line": unknown_image.line,
+                        "kind": "image-libc",
+                        "message": message,
+                    }
+                )
         if not quiet and (resolved := next_python_note(pythons)):
             print(f"wheelgap: note: {resolved}", file=sys.stderr)
         ignore_how = "--ignore" if args.ignore else "ignore in [tool.wheelgap]"
@@ -2779,7 +2820,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
 
     if args.sarif is not None:  # an empty PATH is an error, as for --junit
         try:
-            write_sarif(args.sarif, rows, targets, sources, fail_on, advisory)
+            write_sarif(args.sarif, rows, targets, sources, fail_on, advisory, dockerfile_results(dockerfile_notes))
         except OSError as e:
             print(f"wheelgap: error: {e}", file=sys.stderr)
             return input_error_json(e) if args.json else 2
@@ -2825,6 +2866,12 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             else None
         )
         for command in github_annotations(rows, targets, sources, failing, advisory, fills, installed_by=installed_by):
+            write_command(command, sys.stderr if args.json or args.markdown else sys.stdout)
+        for level, file, at_line, message in dockerfile_results(dockerfile_notes):
+            at_path = relative_path(Path(file))
+            command = workflow_command(
+                "notice" if level == "note" else level, message, at_path, at_line if at_path else None, "wheelgap"
+            )
             write_command(command, sys.stderr if args.json or args.markdown else sys.stdout)
 
     if args.json:
@@ -2888,6 +2935,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     ),
                     *gapwheels.markdown_lines(fills or [], multi_py),
                     *(["", f"> **Warning:** {unseen_line}"] if unseen_line else []),
+                    *dockerfile_markdown(dockerfile_results(dockerfile_notes)),
                 ]
             )
         )

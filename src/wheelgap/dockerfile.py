@@ -103,9 +103,11 @@ class UnknownImageError(DockerfileError):
     """The Dockerfile is one Docker reads, but its final image isn't one wheelgap knows the Python and platform of:
     not an official python or Astral uv image, a tag that names no Python, or a FROM using a build argument wheelgap
     can't expand. `-p` and `-t` on the command line can stand in for it; an error Docker itself would raise can't be
-    stood in for, and stays a plain DockerfileError. `line` is the FROM instruction's line, where it is known."""
+    stood in for, and stays a plain DockerfileError. `line` is the FROM instruction's line, where it is known, and
+    `image` the image it names, as written after build arguments are expanded."""
 
     line: int | None = None
+    image: str | None = None
 
 
 @dataclass(frozen=True)
@@ -899,6 +901,13 @@ def parse_image(image: str, platform: str | None = None) -> ImageTarget:
         raise DockerfileError(f"{image}: repository name must be lowercase, as Docker requires")
     if tag and not _DOCKER_TAG_RE.fullmatch(tag):
         raise DockerfileError(f"{image}: invalid tag {tag!r} (Docker allows only ASCII letters, digits, '_', '.', '-')")
+    if image == "scratch":
+        # BuildKit's empty image (emptyImageName in dockerfile2llb/convert.go): no Python but what a COPY brings,
+        # which -p and -t can't stand in for, since nothing says there is one.
+        raise DockerfileError(
+            "FROM scratch: the image starts empty, so it has no Python but one a COPY brings, which wheelgap "
+            "doesn't follow; -p/-t don't stand in for it"
+        )
     if name not in IMAGE_NAMES and name != UV_IMAGE:
         raise UnknownImageError(
             f"{image}: only the official python images and Python-tagged Astral uv images are supported, "
@@ -987,9 +996,11 @@ def read_dockerfile(path: Path, build_args: Mapping[str, str] | None = None) -> 
     except UnknownImageError as e:
         error = UnknownImageError(f"{path}: {e}")
         error.line = e.line if e.line is not None else number
+        error.image = image if number is not None else None
         raise error from None
     except DockerfileError as e:
-        raise DockerfileError(f"{path}: {e}") from None
+        where = f"{path}:{number}" if number is not None and str(e).startswith("FROM scratch") else path
+        raise DockerfileError(f"{where}: {e}") from None
     given = frozenset(name for name in used if name in (build_args or {}))
     undeclared = tuple(name for name in build_args or {} if name not in global_args.declared)
     return replace(target, build_args=tuple(used.items()), given_args=given, undeclared_args=undeclared)

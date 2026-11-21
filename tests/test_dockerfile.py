@@ -3851,12 +3851,15 @@ def test_cli_dockerfile_inputs_warnings_cant_be_missed(tmp_path, capsys, fake_py
         ("WORKDIR /app\nCOPY sixa .\n", ["sixa"], "pip install six[a]", "COPY on line 3 puts sixa in /app"),
         ("WORKDIR /app\nCOPY src/ ./\n", ["src/sixa"], "pip install six[a]", "puts sixa in /app"),
         ("WORKDIR /app/sixa\nWORKDIR /app\n", [], "pip install six[a]", "a WORKDIR puts sixa in /app"),
-        ("WORKDIR /app\n", [], "mkdir sixa && pip install six[a]", "line 3 may put files in /app"),
+        ("WORKDIR /app\n", [], "mkdir sixa && pip install six[a]", "line 3 may put sixa in /app"),
         ("WORKDIR /app\n", [], "git clone https://example.test/x . && pip install six[a]", "may put files in /app"),
         # Where the folder's contents aren't known, it isn't read either.
-        ("", [], "pip install six[a]", "the folder it runs in isn't known"),
+        ("FROM ubuntu:24.04\n", [], "pip install six[a]", "the folder it runs in isn.t known"),
+        ("", [], "pip install us[r]", ":2: us\\[r\\] is a glob .* and the image puts usr in /"),  # g30
+        ("COPY sixa /\n", ["sixa"], "pip install six[a]", "the COPY on line 2 puts sixa in /"),
+        ("", [], "mkdir sixa && pip install six[a]", "line 2 may put sixa in /"),  # g28
         ("WORKDIR /usr/src/app\n", [], "pip install six[a]", "/usr/src/app is a folder of the image"),
-        ("WORKDIR /\n", [], "pip install six[a]", "/ is a folder of the image"),
+        ("WORKDIR /\n", [], "pip install li[b]", "the image puts lib in /"),
         # Paths with brackets are a project folder or an editable install, not a glob to wheelgap.
         ("WORKDIR /app\n", [], "pip install ./x[dev]", "pip install ./x\\[dev\\]: a project folder or a file"),
         ("WORKDIR /app\n", [], "pip install -e ./x[dev]", "pip install -e ./x\\[dev\\]: an editable install"),
@@ -3881,6 +3884,9 @@ def test_dockerfile_requirements_name_globs_and_paths(tmp_path, head, files, run
         ("WORKDIR /app\nCOPY . .\n", "pip install uvicorn[standard]", ["uvicorn[standard]"]),
         ("WORKDIR /app\n", "pip install 'six[a]'", ["six[a]"]),  # quoted: never a glob
         ("WORKDIR /app\nRUN mkdir -p /data/sixa\n", "pip install six[a]", ["six[a]"]),
+        ("WORKDIR /app\nRUN mkdir data\n", "pip install six[a]", ["six[a]"]),
+        # No WORKDIR on the python image: `/`, whose names are known (Scrapegraph-ai's scrapegraphai[burr]).
+        ("", "pip install scrapegraphai[burr]", ["scrapegraphai[burr]"]),
         # ARG then ENV, or an ARG with no value after an ENV: every builder gives the ENV's value.
         ("ARG VER=1.16.0\nENV VER=1.15.0\n", "pip install six==$VER", ["six==1.15.0"]),
         ("ENV VER=1.15.0\nARG VER\n", "pip install six==$VER", ["six==1.15.0"]),

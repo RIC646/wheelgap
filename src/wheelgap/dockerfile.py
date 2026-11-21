@@ -1172,6 +1172,13 @@ _IMAGE_FOLDERS = frozenset(
 )
 
 
+# What `/` of an official python image holds (Debian's and Alpine's root folders, with every arch's lib folders):
+# the names an unquoted glob run there can match. A superset only makes more globs stop.
+_OFFICIAL_ROOT = (
+    "bin boot dev etc home lib lib32 lib64 libx32 media mnt opt proc root run sbin srv sys tmp usr var .dockerenv"
+).split()
+
+
 def _names_in_folder(copies: list[_Copy], dirs: set[str], folder: str) -> list[tuple[str, int | None]]:
     """(name, the COPY line or None for a WORKDIR) of every entry the instructions so far may put directly in
     `folder` of the image: what each COPY from the build context brings there (a folder's entries listed on disk,
@@ -2942,23 +2949,35 @@ def _dockerfile_requirements(
             why = "the folder it runs in isn't known"
         elif not image_read:
             why = f"the image may have files in {folder}"
-        elif folder == "/" or folder.split("/")[1] in _IMAGE_FOLDERS:
+        elif (folder != "/" or not official) and (folder == "/" or folder.split("/")[1] in _IMAGE_FOLDERS):
             why = f"{folder} is a folder of the image, which may hold files"
         if why is None and folder is not None:
             for line, word, cwd in [*reader.mentions[: install.seen], *reader.created[: install.created]]:
                 if word.startswith("/") or cwd is not None:
                     path = posixpath.normpath(posixpath.join(cwd or "/", word))
-                    if path == folder or folder.startswith(path.rstrip("/") + "/") or posixpath.dirname(path) == folder:
+                    if path == folder or folder.startswith(path.rstrip("/") + "/"):
                         why = f"line {line} may put files in {folder}"
+                        break
+                    if posixpath.dirname(path) == folder and (
+                        fnmatch.fnmatchcase(posixpath.basename(path), glob) or re.search(r"[*?\[]", path)
+                    ):
+                        why = f"line {line} may put {posixpath.basename(path)} in {folder}"
                         break
                 elif posixpath.basename(word) and fnmatch.fnmatchcase(posixpath.basename(word), glob):
                     why = f"line {line} may create {word}"
                     break
         if why is None:
             assert folder is not None
-            for name, copy_line in _names_in_folder(copies, dirs, folder):
+            root = [(name, None) for name in _OFFICIAL_ROOT] if folder == "/" else []
+            for name, copy_line in [*root, *_names_in_folder(copies, dirs, folder)]:
                 if fnmatch.fnmatchcase(name, glob):
-                    by = f"the COPY on line {copy_line}" if copy_line is not None else "a WORKDIR"
+                    by = (
+                        f"the COPY on line {copy_line}"
+                        if copy_line is not None
+                        else "the image"
+                        if name in _OFFICIAL_ROOT
+                        else "a WORKDIR"
+                    )
                     raise DockerfileError(
                         f"line {number}: {glob} is a glob to the shell, and {by} puts {name} in {folder}, "
                         f"which it matches, so pip would install {name}: {quote}"

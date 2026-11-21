@@ -195,6 +195,10 @@
                             "unknown": {"type": "integer", "minimum": 0, "description": "Packages wheelgap couldn't check for this target."}
                         }
                     }
+                },
+                "complete": {
+                    "type": "boolean",
+                    "description": "With --dockerfile-inputs (after 0.13.0), false when dockerfile_warnings lists a line wheelgap couldn't see into, which may install Python packages the answer doesn't have. Absent without the flag."
                 }
             }
         }

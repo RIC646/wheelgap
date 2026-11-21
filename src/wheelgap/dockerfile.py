@@ -10,10 +10,12 @@ import posixpath
 import re
 import shlex
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
+
+from packaging.requirements import InvalidRequirement, Requirement
 
 from . import dockerignore
 from .sources import (
@@ -641,11 +643,15 @@ def _from_instructions(text: str) -> list[tuple[int, str]]:
 
 
 def _parse_froms(
-    text: str, build_args: Mapping[str, str] | None = None, instructions: list[tuple[int, str]] | None = None
+    text: str,
+    build_args: Mapping[str, str] | None = None,
+    instructions: list[tuple[int, str]] | None = None,
+    bodies: dict[int, list[str]] | None = None,
 ) -> tuple[list[tuple[int, str]], _GlobalArgs]:
     """(line number, arguments) of every FROM instruction in order, the line being where the instruction starts.
 
-    If `instructions` is given, every instruction is added to it as (line number, instruction), continuations joined.
+    If `instructions` is given, every instruction is added to it as (line number, instruction), continuations joined;
+    if `bodies` is, the lines of its heredoc bodies are added to it under the instruction's line number.
 
     Heredoc bodies (`RUN <<EOF` ... `EOF`) are skipped, so a line in one is never read as an instruction.
     Follows Parse in BuildKit's parser.go at commit cedaeca8850a2bb536bbd1db72419f3cf491bdb5: each body starts
@@ -716,11 +722,14 @@ def _parse_froms(
             )
         return docs
 
+    owner = 0  # the line of the instruction whose heredoc bodies are being read
     for number, line in enumerate(lines, 1):
         if heredocs:  # a body line: never an instruction, a comment or a continuation
             name, strip_tabs = heredocs[0]
             if (line.lstrip("\t") if strip_tabs else line) == name:
                 heredocs.popleft()
+            elif bodies is not None:
+                bodies.setdefault(owner, []).append(line)
             continue
         # parser.go (linked above): isComment and isEmptyContinuationLine trim leading unicode.IsSpace (not \x1c-\x1f).
         stripped = line.lstrip(_GO_SPACES)
@@ -735,7 +744,8 @@ def _parse_froms(
             continue
         instruction = "".join([*parts, line])  # Docker joins continued lines with nothing in between
         # splitCommand: strings.TrimSpace, https://github.com/moby/buildkit/blob/cedaeca/frontend/dockerfile/parser/split_command.go
-        finish(instruction.strip(_GO_SPACES), joined=bool(parts), line_number=start if parts else number)
+        owner = start if parts else number
+        finish(instruction.strip(_GO_SPACES), joined=bool(parts), line_number=owner)
         heredocs = heredocs_in(instruction)
         parts = []
     if parts:  # the file ended mid-continuation: Docker still reads what's there
@@ -1386,10 +1396,13 @@ class _Shell:
     an assignment or `export` on the line is followed, and any other way a variable can change (`read`, `for`,
     `unset`, an assignment whose value isn't known) forgets it."""
 
-    def __init__(self, text: str, env: Mapping[str, str]) -> None:
+    def __init__(self, text: str, env: Mapping[str, str], bash: bool = False) -> None:
         self.text = text
         self.pos = 0
         self.env = dict(env)
+        # bash reads `&>` and `&>>` as redirects of stdout and stderr; to sh (dash, ash) they are `&` (run the command
+        # before it in the background) and then a redirect.
+        self.bash = bash
         self.commands: list[_Command] = []
         self.unknown: set[str] = set()  # variables the line changed to a value wheelgap doesn't know
         self.forgotten = False  # an eval or a sourced file may have set any variable
@@ -1414,7 +1427,7 @@ class _Shell:
                 self.pos = len(text) if end < 0 else end
                 continue
             if operator := next((op for op in _OPERATORS if text.startswith(op, self.pos)), None):
-                if operator == "&" and text.startswith(("&>", "&>>"), self.pos):
+                if operator == "&" and text.startswith(("&>", "&>>"), self.pos) and self.bash:
                     operator = None
             if operator:
                 self.pos += len(operator)
@@ -1625,7 +1638,7 @@ class _Shell:
         return text[start : self.pos], False
 
     def _substitution(self, inner: str) -> None:
-        sub = _Shell(inner, self.env)
+        sub = _Shell(inner, self.env, self.bash)
         self.commands.extend(sub.parse(nested=True))
 
 
@@ -1640,11 +1653,11 @@ _SYSTEM_COMMANDS = frozenset(
 )
 # shell builtins and file commands,
 _SHELL_COMMANDS = frozenset(
-    ": true false echo printf cd export set unset test [ [[ exit umask ulimit shopt wait sleep pwd readonly local "
-    "return break continue read trap hash type which mkdir chmod chown chgrp rm rmdir cp mv ln touch cat ls sed awk "
-    "grep egrep fgrep head tail tee sort uniq cut tr wc tar unzip gunzip gzip xz bzip2 zip install date basename "
-    "dirname realpath readlink id whoami uname mktemp du df stat file diff patch dd truncate md5sum sha1sum sha256sum "
-    "sha512sum nproc arch getent hostname yes seq lsb_release dpkg-query dpkg-architecture".split()
+    ": true false echo printf cd export declare typeset set unset test [ [[ exit umask ulimit shopt wait sleep pwd "
+    "readonly local return break continue read trap hash type which mkdir chmod chown chgrp rm rmdir cp mv ln touch "
+    "cat ls sed awk grep egrep fgrep head tail tee sort uniq cut tr wc tar unzip gunzip gzip xz bzip2 zip install date "
+    "basename dirname realpath readlink id whoami uname mktemp du df stat file diff patch dd truncate md5sum sha1sum "
+    "sha256sum sha512sum nproc arch getent hostname yes seq lsb_release dpkg-query dpkg-architecture".split()
 )
 # commands that only read: the files they name can't change (their redirects still can),
 _READ_COMMANDS = frozenset(
@@ -1694,19 +1707,59 @@ _PIP_HARMLESS_ENV = frozenset(
 )
 # The same for uv (https://docs.astral.sh/uv/reference/environment/): the cache, bytecode, how files are linked,
 # what is printed, network patience, where uv keeps Pythons and tools, and UV_PROJECT_ENVIRONMENT, which only
-# project commands (`uv sync`, not read) use. UV_SYSTEM_PYTHON is read as --system. UV_VERSION isn't a uv setting
+# project commands (`uv sync`, not read) use, and UV_SYSTEM_CERTS, which picks where TLS certificates come from (a
+# string in the uv 0.13.1 binary). UV_SYSTEM_PYTHON is read as --system. UV_VERSION isn't a uv setting
 # (not in that reference, nor a string in the uv 0.13.1 binary): Dockerfiles use the name for the uv they install.
 _UV_HARMLESS_ENV = frozenset(
     "UV_NO_CACHE UV_CACHE_DIR UV_COMPILE_BYTECODE UV_LINK_MODE UV_NO_PROGRESS UV_HTTP_TIMEOUT UV_HTTP_RETRIES "
     "UV_CONCURRENT_DOWNLOADS UV_CONCURRENT_BUILDS UV_CONCURRENT_INSTALLS UV_PYTHON_DOWNLOADS UV_PYTHON_INSTALL_DIR "
     "UV_TOOL_BIN_DIR UV_TOOL_DIR UV_INSTALL_DIR UV_BREAK_SYSTEM_PACKAGES UV_PROJECT_ENVIRONMENT UV_SYSTEM_PYTHON "
-    "UV_VERSION".split()
+    "UV_SYSTEM_CERTS UV_VERSION".split()
 )
 # Words that name a pip or uv configuration file: a command that isn't read and names one may be writing it.
-_CONFIG_WORDS = ("pip.conf", "pip.ini", ".config/pip", ".pip/", "uv.toml", ".netrc", "pydistutils.cfg", "sitecustomize")
+_CONFIG_WORDS = (
+    "pip.conf",
+    "pip.ini",
+    ".config/pip",
+    "xdg/pip",
+    ".pip/",
+    "uv.toml",
+    ".netrc",
+    "pydistutils.cfg",
+    "sitecustomize",
+)
+# The folders pip reads a config file from, every folder above them (a home folder can be anywhere under /home), and
+# the image Python's prefix (pip reads `sys.prefix/pip.conf`): a command that writes one of these folders whole, or a
+# mount over one, may put a pip config file in place.
+_CONFIG_PARENTS = (
+    "/",
+    "/etc",
+    "/etc/xdg",
+    "/etc/xdg/pip",
+    "/root",
+    "/root/.config",
+    "/root/.config/pip",
+    "/root/.pip",
+    "/home",
+    "/usr",
+    "/usr/local",
+)
+# git commands that change the files of a work tree, which may be the folder a command runs in or any folder above it.
+_GIT_WRITES = frozenset(
+    "checkout switch restore reset pull merge rebase cherry-pick revert stash apply am clean mv rm submodule".split()
+)
+# The folders the official python images' own Python is in: pip, python and pythonX.Y anywhere else (Debian's
+# /usr/bin/python3, a Python an earlier line installed) are another Python.
+_IMAGE_PYTHON_DIRS = frozenset({"/usr/local/bin"})
+_VERSIONED_RE = re.compile(r"(?:pip|python)(\d+\.\d+)", re.ASCII)
 _SHELL_RE = re.compile(
     r'\[\s*"(?:/bin/|/usr/bin/)?(?:sh|bash|dash|ash)"\s*,(?:\s*"(?:-[euxo]+|pipefail)"\s*,)*\s*"-[euxo]*c"\s*\]'
 )
+
+
+def _config_folder(path: str) -> bool:
+    """Whether a folder (absolute, normalised) is or holds one pip reads a config file from (see _CONFIG_PARENTS)."""
+    return path in _CONFIG_PARENTS or (path.startswith("/home/") and path.count("/") == 2)
 
 
 def _installer_setting(name: str) -> bool:
@@ -1729,6 +1782,8 @@ class InputsReport:
     # it doesn't know. The answer doesn't cover them, and the caller must say so where it can't be missed.
     warnings: list[tuple[int, str]] = field(default_factory=list)
     notes: list[tuple[int, str, str]] = field(default_factory=list)  # (line, kind, message)
+    # (line, what the line does) for every warning, in the order the lines run: an install after one is an error.
+    unseen: list[tuple[int, str]] = field(default_factory=list)
     # (line, name) for each Python package a system package command installs (apk add py3-yaml, apt-get install
     # python3-numpy): pip keeps one that satisfies a requirement, where wheelgap checks a fresh install.
     system_python: list[tuple[int, str]] = field(default_factory=list)
@@ -1737,6 +1792,11 @@ class InputsReport:
         lines = self.passed_over.setdefault(kind, [])
         if number not in lines:
             lines.append(number)
+
+    def warn(self, number: int, what: str) -> None:
+        """A line that runs `what`, which wheelgap can't see into."""
+        self.warnings.append((number, what))
+        self.unseen.append((number, f"runs {what}"))
 
 
 @dataclass
@@ -1750,6 +1810,8 @@ class _Install:
     cwd: str | None  # the folder a relative FILE is in, or None with cwd_error
     cwd_error: str | None
     seen: int = 0  # how many of the reader's mentions come before it
+    unseen: int = 0  # how many lines wheelgap can't see into come before it (InputsReport.unseen)
+    mounts: tuple[str, ...] = ()  # the folders a cache or tmpfs mount covers while it runs
 
 
 def _requirement_name(text: str) -> str | None:
@@ -1766,9 +1828,19 @@ class _RunReader:
     a command wheelgap can't see into (a warning), or one that installs in a way that isn't read (a DockerfileError).
     """
 
-    def __init__(self, report: InputsReport) -> None:
+    def __init__(self, report: InputsReport, pythons: tuple[str, ...] | None = None, image_read: bool = True) -> None:
         self.report = report
-        self.venvs: set[str] = set()  # folders `python -m venv` made: their bin/pip is the image's Python's
+        # The Pythons the check is for (-p, else the image's), and whether the image was read (an official python
+        # image, whose own Python is in /usr/local/bin) or -p/-t stand in for it. None: not known.
+        self.pythons = pythons
+        self.image_read = image_read
+        # Folders `python -m venv` made, with the X.Y of the Python that made them (None: the image's own).
+        self.venvs: dict[str, str | None] = {}
+        # Where a bare `pip`, `python` or `uv` comes from: None for the image's own, ("venv", folder) for a venv's
+        # bin put first on the PATH, ("unknown", why) for a folder wheelgap knows nothing about.
+        self.path: tuple[str, str] | None = None
+        self.ambiguous: dict[str, int] = {}  # names an ENV and then an ARG set, by the ARG's line
+        self.system_before = 0  # how many of report.system_python come before the last install read
         # (line, word, folder) for each word of a command that wasn't read and may name a file it writes.
         self.mentions: list[tuple[int, str, str | None]] = []  # with the folder the command ran in, if known
         self.config_error: str | None = None  # a command that may have written a pip or uv config file
@@ -1782,7 +1854,12 @@ class _RunReader:
         workdir: str | None,
         workdir_error: str | None,
         uv_system: bool,
+        bash: bool = False,
+        body: str = "",
     ) -> list[_Install]:
+        """The installs of one RUN, in order. `bash` says the SHELL is bash, and `body` is the text of the RUN's
+        heredocs."""
+
         def stop(message: str) -> NoReturn:
             raise DockerfileError(f"line {number}: {message}")
 
@@ -1790,6 +1867,8 @@ class _RunReader:
         if not args.endswith(rest) or any(c in args[: len(args) - len(rest)] for c in "\"'\\"):
             stop("RUN flags with quotes or escapes aren't read by --dockerfile-inputs")
         mounts = set()
+        covered: list[str] = []  # the folders a cache or tmpfs mount puts other files in while the RUN runs
+        unknown_mount: str | None = None
         for flag in args[: len(args) - len(rest)].split():
             if flag.startswith("--mount="):
                 # type= defaults to bind (instructions/commands_runmount.go, parseMount).
@@ -1797,6 +1876,13 @@ class _RunReader:
                 mounts.add(fields.get("type", "bind"))
                 if "$" in fields.get("type", ""):
                     stop("RUN --mount with a variable for its type isn't read by --dockerfile-inputs")
+                if fields.get("type") in ("cache", "tmpfs"):
+                    at = next((fields[key] for key in ("target", "dst", "destination") if key in fields), "")
+                    at = _VAR_REF_RE.sub(lambda m: env.get(m.group(1) or m.group(2), "$?"), at)
+                    if not at or "$" in at or (not at.startswith("/") and workdir is None):
+                        unknown_mount = f"wheelgap can't tell which folder `{flag[:60]}` covers"
+                    else:
+                        covered.append(posixpath.normpath(posixpath.join(workdir or "/", at)))
             elif not flag.startswith(("--network=", "--security=")):
                 stop(f"RUN {flag.split('=')[0]} isn't a RUN flag --dockerfile-inputs reads")
         if mounts & {"cache", "tmpfs"}:
@@ -1808,10 +1894,19 @@ class _RunReader:
         if _is_exec_form(instruction, rest):
             commands = [_Command(words=[_Word(item) for item in json.loads(rest)])]
         elif _heredocs(instruction):
-            self.report.warnings.append((number, "a heredoc script"))
+            # The body isn't split into commands. Naming an installer anywhere in it is an error; otherwise it is a
+            # line wheelgap can't see into.
+            for word in re.findall(r"[A-Za-z0-9_./+-]+", f"{rest}\n{body}"):
+                base = posixpath.basename(word)
+                if _PIP_RE.fullmatch(base) or _PYTHON_RE.fullmatch(base) or base in _INSTALLERS or base == "uv":
+                    stop(
+                        f"this RUN's heredoc names {base}, and --dockerfile-inputs doesn't read heredoc scripts: it "
+                        "can't tell what is installed"
+                    )
+            self.report.warn(number, "a heredoc script")
             return []
         else:
-            parser = _Shell(rest, env)
+            parser = _Shell(rest, env, bash)
             try:
                 commands = parser.parse()
             except _ShellError as e:
@@ -1827,7 +1922,8 @@ class _RunReader:
                 and re.fullmatch(r"-[eux]*c", words[1].text)
             ):
                 try:
-                    inner = _Shell(words[2].text, parser.env if parser else {}).parse(nested=True)
+                    inner_bash = posixpath.basename(words[0].text) == "bash"
+                    inner = _Shell(words[2].text, parser.env if parser else {}, inner_bash).parse(nested=True)
                 except _ShellError as e:
                     stop(f"this RUN has {e}, which --dockerfile-inputs doesn't read")
                 commands[index : index + 1] = inner or [_Command(words=[_Word(":")])]
@@ -1838,12 +1934,15 @@ class _RunReader:
         depth = 0  # inside if, for, while, until or { }
         risky_setting: str | None = None
         names_installer = False  # a pip or uv command, read or not
+        exited: str | None = None  # an `exit` or `return` before the command: it may never run
+        image_path = self.path  # a RUN is a shell of its own: what it does to PATH ends with it
         groups = self._and_or_lists(commands)
         for index, command in enumerate(commands):
             words = list(command.words)
             texts = [word.text for word in words]
             assigns = list(command.assigns)
             conditional = None
+            negated = False
             # Reserved words (2.4): what follows `if`, `then`, `do`... is a command like any other, but it may not run.
             while words and words[0].exact:
                 reserved = words[0].text
@@ -1851,7 +1950,9 @@ class _RunReader:
                     depth += 1
                 elif reserved in ("fi", "done", "}"):
                     depth = max(depth - 1, 0)
-                elif reserved not in ("then", "elif", "else", "do", "!", "time"):
+                elif reserved == "!":
+                    negated = True
+                elif reserved not in ("then", "elif", "else", "do", "time"):
                     break
                 words = words[1:]
             while words and words[0].assigns and words[0].exact is not None:  # `then NAME=value command`
@@ -1874,6 +1975,10 @@ class _RunReader:
                 conditional = "inside ( )"
             elif groups[index]:
                 conditional = groups[index]
+            elif exited:
+                conditional = f"after `{exited}` on the same RUN"
+            elif negated:
+                conditional = "negated with `!`, so the RUN succeeds only when it fails"
             # Wrappers that run the rest as the command.
             while words and words[0].exact and words[0].text in ("sudo", "exec", "command", "nice", "nohup", "env"):
                 wrapper = words[0].text
@@ -1885,11 +1990,18 @@ class _RunReader:
                     words = words[1:]
                 if wrapper in ("sudo", "env") and words and words[0].text.startswith("-"):
                     words = [_Word(f"{wrapper} {words[0].text}", exact=False)]
-            if words and words[0].exact and words[0].text == "export":
+            if words and words[0].exact and words[0].text in ("export", "declare", "typeset", "readonly", "local"):
                 assigns += [(w.assigns, _Word(w.text.partition("=")[2], w.exact)) for w in words[1:] if w.assigns]
-            for name, _ in assigns:
+                if unknown := next((w for w in words[1:] if not w.exact), None):
+                    # `export $(cat .env | xargs)`: any name, PIP_ and UV_ settings among them.
+                    risky_setting = f"`{words[0].text} {unknown.text}` may set any variable, PIP_ and UV_ ones too:"
+            for name, value in assigns:
                 if _installer_setting(name):
                     risky_setting = name
+                if name == "PATH":
+                    self.path = self._path_entry(value.text, f"line {number}")
+            if first in ("exit", "return") and not command.nested and not command.subshell:
+                exited = first
             kind, detail = self._classify(number, words, cwd, uv_system, stop) if words else ("shell", "")
             if kind in ("install", "installer-tools", "pip"):
                 names_installer = True
@@ -1904,10 +2016,16 @@ class _RunReader:
                 if any(operator.endswith("<") for operator, _ in command.redirects):
                     stop(f"`{' '.join(texts)}` reads its input from a redirect, which --dockerfile-inputs doesn't read")
                 detail.cwd, detail.cwd_error, detail.seen = cwd, cwd_error, len(self.mentions)
+                detail.unseen, detail.mounts = len(self.report.unseen), tuple(covered)
+                if unknown_mount:
+                    stop(f"{unknown_mount}, and it may hide the requirements file or put a pip config file in place")
+                if config := next((folder for folder in covered if _config_folder(folder)), None):
+                    stop(f"a cache or tmpfs mount over {config} may put a pip config file in place for this install")
+                self.system_before = len(self.report.system_python)
                 installs.append(detail)
             elif kind == "warning":
                 assert isinstance(detail, str)
-                self.report.warnings.append((number, detail))
+                self.report.warn(number, detail)
             elif kind == "installer-tools":
                 self.report.passed(kind, number)
                 self.report.tools += [name for name in str(detail).split() if name not in self.report.tools]
@@ -1925,18 +2043,134 @@ class _RunReader:
                     cwd = posixpath.normpath(posixpath.join(cwd, target.text))
             elif first in ("pushd", "popd"):
                 cwd, cwd_error = None, f"line {number}: the folder after `{first}` isn't known"
+            elif first in (".", "source") and kind == "venv":
+                # `. /venv/bin/activate` puts the venv's bin first on the PATH.
+                self.path = self._path_entry(posixpath.dirname(words[1].text), f"line {number}", cwd)
             # What this command may write to. A command that only reads can't change the files it names.
             written = [target.text for operator, target in command.redirects if ">" in operator]
+            anywhere = False
             if kind not in ("install", "pip", "system-packages") and first not in _UNCHANGING_COMMANDS:
                 written += [word.text for word in words[1:]]
+                if words and (folder := self._writes_folder(words)):
+                    written.append(folder if folder.startswith("/") or cwd is not None else "/")
+                    anywhere = folder == "/"  # git: any file of the work tree, which the config check leaves out
             self.mentions += [(number, text, cwd) for text in written]
-            if kind not in ("install", "pip") and (word := next((t for t in written if _names_config(t)), None)):
-                self.config_error = (
-                    f"line {number}: `{' '.join(texts)[:60]}` names {word}, which may be a pip or uv config file"
-                )
+            for text in (written[:-1] if anywhere else written) if kind not in ("install", "pip", "venv") else ():
+                folder = posixpath.normpath(posixpath.join(cwd or "/", text)) if text.startswith("/") or cwd else ""
+                if _names_config(text):
+                    self.config_error = (
+                        f"line {number}: `{' '.join(texts)[:60]}` names {text}, which may be a pip or uv config file"
+                    )
+                    break
+                if (_config_folder(folder) or folder in self.venvs) and not self._copies_no_config(words):
+                    self.config_error = (
+                        f"line {number}: `{' '.join(texts)[:60]}` writes into {text}, where pip or uv may read a "
+                        "config file"
+                    )
+                    break
         if risky_setting and names_installer:
+            if risky_setting.endswith(":"):
+                stop(f"{risky_setting} a setting on this RUN may change what pip or uv installs")
             stop(f"{risky_setting} is set on this RUN and may change what pip or uv installs")
+        self.path = image_path
         return installs
+
+    @staticmethod
+    def _copies_no_config(words: list[_Word]) -> bool:
+        """Whether a cp, mv, ln or install of named files (not a folder's contents) can't be putting a pip or uv
+        config file, or a folder that holds one, in place: no recursive copy, and no source named like one."""
+        if not words or posixpath.basename(words[0].text) not in ("cp", "mv", "ln", "install"):
+            return False
+        names = ("pip.conf", "pip.ini", "pip", ".pip", ".config", "xdg", "uv", "uv.toml", ".netrc", ".pydistutils.cfg")
+        # The sources, and the destination, which may be the name a source gets (`mv cfg /root/.config`).
+        sources = [posixpath.basename(word.text.rstrip("/")) for word in words[1:] if not word.text.startswith("-")]
+        if any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*|--recursive|--archive", word.text) for word in words[1:]):
+            return False
+        # A shell glob only matches a leading dot that it spells out.
+        return bool(sources) and not any(
+            source in ("", ".", "..")
+            or (fnmatch.fnmatchcase(name, source) and (source.startswith(".") or not name.startswith(".")))
+            for source in sources
+            for name in names
+        )
+
+    @staticmethod
+    def _writes_folder(words: list[_Word]) -> str | None:
+        """The folder an archive, patch or git command writes files into without naming them: `tar x` and `unzip`
+        unpack into the current folder (or -C / -d), `patch` changes the files its input names, and git commands that
+        change a work tree may change any file of a repository the folder is in ("/")."""
+        base = posixpath.basename(words[0].text)
+        texts = [word.text for word in words[1:]]
+
+        def option(*names: str) -> str | None:
+            for i, text in enumerate(texts):
+                for name in names:
+                    if text == name and i + 1 < len(texts):
+                        return texts[i + 1]
+                    if text.startswith(name + ("=" if name.startswith("--") else "")) and text != name:
+                        return text[len(name) :].removeprefix("=")
+            return None
+
+        if base in ("tar", "bsdtar"):
+            return option("-C", "--directory") or "."
+        if base == "unzip":
+            return option("-d") or "."
+        if base == "patch":
+            return option("-d", "--directory") or "."
+        if base == "cpio":
+            return "."
+        if base == "git":
+            rest = list(texts)
+            while rest and rest[0].startswith("-"):
+                rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+            if rest and rest[0] in _GIT_WRITES:
+                return "/"
+        return None
+
+    def _path_entry(self, value: str, where: str, cwd: str | None = "/") -> tuple[str, str] | None:
+        """What a bare pip, python or uv is once PATH is `value` (see self.path)."""
+        for entry in value.split(":"):
+            if entry in ("$PATH", "${PATH}"):
+                return self.path  # the earlier PATH, from here on
+            if entry.startswith("/") or cwd is not None:
+                entry = posixpath.normpath(posixpath.join(cwd or "/", entry))
+            if entry in _IMAGE_PYTHON_DIRS or (not self.image_read and entry in _BIN_DIRS):
+                return None
+            if entry in ("/usr/local/sbin", "/usr/sbin", "/sbin"):
+                continue  # no Python is installed in these
+            if posixpath.basename(entry) == "bin" and posixpath.dirname(entry) in self.venvs:
+                return "venv", posixpath.dirname(entry)
+            return "unknown", f"{where} puts {entry} first on the PATH"
+        return "unknown", f"{where} sets a PATH without the image's Python"
+
+    def _python(self, name: str, base: str, cwd: str | None, shown: str, stop) -> str | None:  # type: ignore[no-untyped-def]
+        """The X.Y of the Python a pip, python or uv command runs (None: the image's own), or an error if wheelgap
+        can't tell, or if it isn't the Python this run checks."""
+        version = None
+        if "/" in name:
+            folder = posixpath.dirname(posixpath.dirname(posixpath.normpath(posixpath.join(cwd or "/", name))))
+            if posixpath.basename(posixpath.dirname(name)) == "bin" and folder in self.venvs:
+                version = self.venvs[folder]
+            elif posixpath.dirname(name) not in (_IMAGE_PYTHON_DIRS if self.image_read else _BIN_DIRS):
+                where = "/usr/local/bin" if self.image_read else "/usr/bin, /usr/local/bin"
+                stop(
+                    f"`{shown}`: --dockerfile-inputs doesn't know which Python {name} belongs to (only pip, "
+                    f"python -m pip and uv on the PATH or in {where}, or in a virtual environment `python -m venv` "
+                    "made on an earlier line, are read)"
+                )
+        elif self.path is not None and self.path[0] == "unknown":
+            stop(f"`{shown}`: {base} may not be the image's own, since {self.path[1]}")
+        elif self.path is not None:
+            version = self.venvs[self.path[1]]
+        if m := _VERSIONED_RE.fullmatch(base):
+            version = m.group(1)
+        if version is not None and (self.pythons is None or any(python != version for python in self.pythons)):
+            checked = ", ".join(self.pythons) if self.pythons else "a Python that isn't known"
+            stop(
+                f"`{shown}` installs for Python {version}, and this run checks {checked}: run pip with the image's "
+                f"own Python, or check with -p {version}"
+            )
+        return version
 
     def check_untouched(self, number: int, host: Path, target: str | None, seen: int) -> None:
         """A requirements file an install line reads (`host`, at `target` in the image if that is known) must be the
@@ -1948,8 +2182,9 @@ class _RunReader:
                 path = posixpath.normpath(posixpath.join(cwd or "/", word))
                 named = fnmatch.fnmatchcase(target, path) or target.startswith(path.rstrip("/") + "/")
             if named:
+                names = "may change files anywhere" if word == "/" else f"names {word}"
                 raise DockerfileError(
-                    f"line {number}: {host.name} may have been changed by line {line}, which names {word} and "
+                    f"line {number}: {host.name} may have been changed by line {line}, which {names} and "
                     "isn't read by --dockerfile-inputs"
                 )
 
@@ -1958,6 +2193,23 @@ class _RunReader:
         """For each command, why it may not run or may fail unnoticed: its and-or list (2.9.3) has a `||`, it is
         part of a pipeline, or it runs in the background."""
         reasons: list[str | None] = [None] * len(commands)
+        # After `&&` in a list that `;`, `&` or a new line ends: if the command before it fails, it is skipped and the
+        # RUN goes on, so the build can succeed without it. (Only the RUN's last list fails the build that way.)
+        lists: list[list[int]] = []
+        for index, command in enumerate(commands):
+            if command.nested:
+                continue
+            if lists and command.before in ("&&", "||", "|"):
+                lists[-1].append(index)
+            else:
+                lists.append([index])
+        skipped: list[str | None] = [None] * len(commands)
+        for members in lists[:-1]:
+            for index in members[1:]:
+                if commands[index].before == "&&":
+                    skipped[index] = (
+                        "after && in a list that isn't the RUN's last, so it is skipped if a command before it fails"
+                    )
         start = 0
         for index, command in enumerate(commands):
             if index and command.before not in ("&&", "||", "|"):
@@ -1978,7 +2230,7 @@ class _RunReader:
         for index in range(len(commands) - 2, -1, -1):
             if commands[index + 1].before in ("&&", "||", "|") and reasons[index + 1] and not reasons[index]:
                 reasons[index] = reasons[index + 1]
-        return reasons
+        return [reason or skip for reason, skip in zip(reasons, skipped, strict=True)]
 
     def _opaque_structure(self, number: int, commands: list[_Command], what: str, stop) -> None:  # type: ignore[no-untyped-def]
         """A RUN with a structure wheelgap doesn't split: an error if any word names an installer, else a warning."""
@@ -1990,7 +2242,7 @@ class _RunReader:
                         f"this RUN names {base} inside `{what}`, which --dockerfile-inputs doesn't read: "
                         "it can't tell what is installed"
                     )
-        self.report.warnings.append((number, f"a `{what}` command list"))
+        self.report.warn(number, f"a `{what}` command list")
 
     def _classify(self, number, words, cwd, uv_system, stop):  # type: ignore[no-untyped-def]
         """(class, detail) for one simple command: ("install", _Install), ("warning", what it runs), or a class it is
@@ -2001,21 +2253,16 @@ class _RunReader:
             return "warning", f"`{shown}`, a command name wheelgap can't resolve"
         name = first.text
         base = posixpath.basename(name)
-        if "/" in name and posixpath.dirname(name) not in _BIN_DIRS:
-            folder = posixpath.dirname(posixpath.dirname(posixpath.normpath(posixpath.join(cwd or "/", name))))
-            in_venv = posixpath.basename(posixpath.dirname(name)) == "bin" and folder in self.venvs
-            if (
-                base in _INSTALLERS
-                or base == "uv"
-                or ((_PIP_RE.fullmatch(base) or _PYTHON_RE.fullmatch(base)) and not in_venv)
-            ):
+        pythonish = _PIP_RE.fullmatch(base) or _PYTHON_RE.fullmatch(base)
+        version = self._python(name, base, cwd, shown, stop) if pythonish else None
+        if "/" in name and posixpath.dirname(name) not in _BIN_DIRS and not pythonish:
+            if base in _INSTALLERS or base == "uv":
                 stop(
                     f"`{shown}`: --dockerfile-inputs doesn't know which Python {name} belongs to (only pip, "
                     "python -m pip and uv on the PATH, or in a virtual environment `python -m venv` made on an "
                     "earlier line, are read)"
                 )
-            if not in_venv:
-                return "warning", f"`{shown}`, a script or program at a path"
+            return "warning", f"`{shown}`, a script or program at a path"
         args = words[1:]
         if _PIP_RE.fullmatch(base):
             return self._pip(number, args, False, uv_system, shown, stop)
@@ -2035,7 +2282,7 @@ class _RunReader:
                 if module in ("venv", "virtualenv"):
                     folders = [word for word in rest if not word.text.startswith("-")]
                     if len(folders) == 1 and folders[0].exact and (cwd is not None or folders[0].text.startswith("/")):
-                        self.venvs.add(posixpath.normpath(posixpath.join(cwd or "/", folders[0].text)))
+                        self.venvs[posixpath.normpath(posixpath.join(cwd or "/", folders[0].text))] = version
                     return "venv", ""
                 if module == "ensurepip":
                     return "installer-tools", "pip"
@@ -2052,6 +2299,8 @@ class _RunReader:
                 return "installer-tools", "pip"
             return "warning", f"`{shown}`, a Python script wheelgap doesn't look into"
         if base == "uv":
+            if self.path is not None:  # uv pip install --system installs for the first Python on the PATH
+                self._python("python", "python", cwd, shown, stop)
             return self._uv(number, args, uv_system, shown, stop)
         if base in _INSTALLERS:
             if [word.text for word in args] in (["--version"], ["-V"], ["--help"]):
@@ -2063,6 +2312,8 @@ class _RunReader:
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
         if base == "find" and any(word.text in ("-exec", "-execdir", "-ok", "-okdir") for word in args):
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
+        if base in ("awk", "gawk", "mawk", "nawk") and any("system" in word.text or "|" in word.text for word in args):
+            return "warning", f"`{shown}`, which can run commands wheelgap can't see"
         if base in _SYSTEM_COMMANDS:
             for word in args:
                 if (m := _SYSTEM_PYTHON_RE.fullmatch(word.text)) and m.group(1) not in _SYSTEM_PYTHON_TOOLS:
@@ -2097,6 +2348,11 @@ class _RunReader:
         if subcommand != "install":
             stop(f"`{shown}`: only `install` is read of {tool}'s commands, and this one may change what is installed")
         if unknown := next((word for word in args if not word.exact), None):
+            if both := next((name for name in self.ambiguous if re.search(rf"\$\{{?{name}\b", unknown.text)), None):
+                stop(
+                    f"`{shown}`: {both} is set by an ENV and then by the ARG on line {self.ambiguous[both]}, and "
+                    "builders differ on which value a RUN sees (BuildKit the ARG's, the classic builder the ENV's)"
+                )
             stop(
                 f"`{shown}`: {unknown.text} isn't a value --dockerfile-inputs can read (a variable with no value in "
                 "the Dockerfile, a command substitution or a glob)"
@@ -2107,6 +2363,9 @@ class _RunReader:
         named = [text for text in rest[1:] if text not in flags and not text.startswith("--root-user-action")]
         tools = [_requirement_name(text) for text in named]
         if named and all(tool_name in _INSTALLER_TOOLS for tool_name in tools):
+            if any(tool_name == "pip" and _not_newest(text) for tool_name, text in zip(tools, named, strict=True)):
+                # A pip other than the newest may pick other files (older pips don't know newer manylinux tags).
+                return "warning", f"`{shown}`, which installs a pip version wheelgap doesn't answer for"
             return "installer-tools", " ".join(dict.fromkeys(tools))
         files, constraints, prefer_binary = _pip_install_files(number, rest, uv, uv_system)
         return "install", _Install(uv, files, constraints, prefer_binary, None, None)
@@ -2159,6 +2418,26 @@ def _env_pairs(
         else:
             pairs.append((name, None, True))
     return pairs
+
+
+def _written_value(args: str, name: str) -> str | None:
+    """The value an ENV gives `name`, as written (variables not expanded), or None if wheelgap can't tell."""
+    try:
+        words = _ShellLexer(args, raw_quotes=False, raw_escapes=False).words()
+    except (_LexError, RecursionError):
+        return None
+    if words and "=" not in words[0]:
+        return " ".join(words[1:]) if words[0] == name and len(words) > 1 else None
+    return next((word.partition("=")[2] for word in words if word.startswith(f"{name}=")), None)
+
+
+def _not_newest(text: str) -> bool:
+    """Whether a requirement may exclude the newest release (a pin or an upper bound)."""
+    try:
+        requirement = Requirement(text)
+    except InvalidRequirement:
+        return True
+    return any(spec.operator not in (">=", ">") for spec in requirement.specifier)
 
 
 def _names_config(text: str) -> bool:
@@ -2245,6 +2524,7 @@ def dockerfile_requirements(
     dependencies: bool = False,
     uv_installs: set[tuple[int, Path]] | None = None,
     report: InputsReport | None = None,
+    pythons: Sequence[str] | None = None,
 ) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `pip install -r FILE` the RUN lines of the Dockerfile's final stage run.
 
@@ -2294,6 +2574,7 @@ def dockerfile_requirements(
             dependencies=dependencies,
             uv_installs=uv_installs,
             report=report,
+            pythons=tuple(pythons) if pythons is not None else None,
         )
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
@@ -2314,6 +2595,7 @@ def _dockerfile_requirements(
     dependencies: bool = False,
     uv_installs: set[tuple[int, Path]] | None = None,
     report: InputsReport | None = None,
+    pythons: tuple[str, ...] | None = None,
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
     try:
@@ -2331,7 +2613,8 @@ def _dockerfile_requirements(
             f"# syntax={syntax}: --dockerfile-inputs only reads Dockerfiles for docker/dockerfile frontends"
         )
     instructions: list[tuple[int, str]] = []
-    froms, global_args = _parse_froms(text, build_args, instructions=instructions)
+    bodies: dict[int, list[str]] = {}
+    froms, global_args = _parse_froms(text, build_args, instructions=instructions, bodies=bodies)
     if report is None:
         report = InputsReport()
     if _heredoc_rules(syntax) is None:  # a digest-pinned docker/dockerfile: any version, so any `<<` may be a heredoc
@@ -2345,9 +2628,15 @@ def _dockerfile_requirements(
         raise DockerfileError("no FROM line found")
     final_line = froms[-1][0]
     # The FROM that names the final image: an earlier one if the final stage builds on a stage (`FROM ${BASE}` too).
+    image_read = True  # an official python image, whose own Python is in /usr/local/bin
     try:
-        base_line = _final_from(text, build_args)[2]
+        base_image, base_platform, base_line, _, _ = _final_from(text, build_args)
+        try:
+            parse_image(base_image, base_platform)
+        except UnknownImageError:
+            image_read = False
     except UnknownImageError as e:
+        image_read = False
         # The caller has -p/-t for an image wheelgap can't read (it raised this error itself otherwise). The stage's
         # instructions are read all the same, once it is certain the FROM names an image and not an earlier stage:
         # a build argument wheelgap can't expand may name either.
@@ -2386,6 +2675,11 @@ def _dockerfile_requirements(
             )
         else:
             target = posixpath.normpath(posixpath.join(install.cwd, file))
+        if mount := next((m for m in install.mounts if (target + "/").startswith(m.rstrip("/") + "/")), None):
+            raise DockerfileError(
+                f"line {number}: a cache or tmpfs mount over {mount} covers {target} while this RUN runs, so the "
+                "install may read another file than the one COPY put there"
+            )
         host = _find_copied_file(copies, target, context, number, ignore_rules)
         # A constraints file's includes are verified as a requirements file's are: a -r inside it is read as
         # requirements (pip's rule), so those packages are installed, and a -c inside it constrains them all.
@@ -2406,12 +2700,26 @@ def _dockerfile_requirements(
             includes[number, host] = nested
         return host
 
-    reader = _RunReader(report)
+    reader = _RunReader(report, pythons, image_read)
     env: dict[str, str] = {}  # the ENV and ARG values wheelgap knows, as the shell of a RUN sees them
     uv_system = False  # ENV UV_SYSTEM_PYTHON=1: uv reads it as --system
+    bash = False  # SHELL ["/bin/bash", "-c"]: `&>` is a redirect, not `&`
+    env_names: set[str] = set()  # the names an ENV set
     global_defaults = global_args.defaults if not global_args.unreadable else {}
 
     def read_install(install: _Install) -> None:
+        if install.unseen:
+            # A line wheelgap can't see into may change what this install fetches (a requirements file, a pip config
+            # file, PIP_ settings) or the pip and Python it runs: no answer is given. One after the last install
+            # can't change what the read installs fetch, so it is only a warning.
+            line, what = report.unseen[0]
+            where = "on the same line" if line == number else f"on line {number}"
+            raise DockerfileError(
+                f"line {line}: this line {what}, and wheelgap can't see into it. It comes before the install "
+                f"{where}, and may change what that install fetches or the pip and Python it runs, so "
+                "--dockerfile-inputs doesn't answer (such a line is only passed over, with a warning, after the "
+                "last install it reads)"
+            )
         if run_error:
             raise DockerfileError(run_error)
         if reader.config_error:
@@ -2510,6 +2818,7 @@ def _dockerfile_requirements(
                     f"line {number}: SHELL {args[:60]} changes how RUN lines run: --dockerfile-inputs only reads "
                     "sh, dash, ash and bash run with -c (and -e, -u, -x, -o pipefail)"
                 )
+            bash = re.match(r'\[\s*"(?:/bin/|/usr/bin/)?bash"', args) is not None
         elif keyword in ("ENV", "ARG"):
             pairs = _env_pairs(keyword, args, build_args or {}, global_defaults)
             if pairs is None:
@@ -2517,6 +2826,8 @@ def _dockerfile_requirements(
                 env.clear()
                 if re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
                     run_error = f"line {number}: an {keyword} setting PIP_ or UV_ variables changes what pip installs"
+                if "PATH" in args:
+                    reader.path = "unknown", f"the {keyword} on line {number} may change PATH"
                 continue
             for name, value, unset in pairs:
                 if unset:
@@ -2531,18 +2842,37 @@ def _dockerfile_requirements(
                             )
                         )
                     continue
+                if keyword == "ARG" and name in env_names:
+                    # BuildKit puts an ARG with a value in the environment over an earlier ENV of the same name
+                    # (dispatchArg: `d.state.AddEnv` in dockerfile2llb/convert.go); the classic builder keeps the
+                    # ENV. Which one a RUN sees depends on the builder, so the value isn't known.
+                    reader.ambiguous[name] = number
+                    value = None
+                if keyword == "ENV":
+                    env_names.add(name)
+                    reader.ambiguous.pop(name, None)
                 if value is None:
                     env.pop(name, None)
                 else:
                     env[name] = value
+                if name == "PATH":
+                    written = _written_value(args, name) if keyword == "ENV" else None
+                    reader.path = (
+                        reader._path_entry(written, f"ENV PATH on line {number}")
+                        if written is not None
+                        else ("unknown", f"the {keyword} on line {number} sets PATH")
+                    )
                 if _installer_setting(name):
                     # The value is left out: an index URL may hold credentials.
                     run_error = f"line {number}: {keyword} {name} may change what pip or uv installs"
                 elif name == "UV_SYSTEM_PYTHON":
                     uv_system = value is not None and value.lower() in ("1", "true")
         elif keyword == "RUN":
-            for install in reader.read(number, instruction, args, env, workdir, workdir_error, uv_system):
+            body = "\n".join(bodies.get(number, []))
+            for install in reader.read(number, instruction, args, env, workdir, workdir_error, uv_system, bash, body):
                 read_install(install)
+    # A system package installed after the last install can't be one pip keeps instead of fetching.
+    del report.system_python[reader.system_before :]
     if not found:
         unseen = ""
         if report.warnings:

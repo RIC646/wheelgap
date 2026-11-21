@@ -58,6 +58,20 @@ DOCKERFILE_RULES = {
         "helpUri": DOCS,
         "defaultConfiguration": {"level": "note"},
     },
+    "warning": {
+        "id": "wheelgap/dockerfile-unseen",
+        "name": "DockerfileLineNotSeen",
+        "shortDescription": {
+            "text": "A Dockerfile line wheelgap can't see into: the answer may not be the whole image"
+        },
+        "fullDescription": {
+            "text": "--dockerfile-inputs couldn't see into this line (a script, make, an unknown program, files "
+            "copied from another stage), which comes after the last install it read. Python packages it installs "
+            "are not in the answer."
+        },
+        "helpUri": DOCS,
+        "defaultConfiguration": {"level": "warning"},
+    },
 }
 
 

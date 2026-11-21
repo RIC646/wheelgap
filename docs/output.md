@@ -475,7 +475,10 @@ install Python packages, which pip may keep instead of fetching a requirement). 
 `dockerfile_warnings` (after 0.13.0, always there with `--dockerfile-inputs`) lists the `RUN` lines wheelgap
 couldn't see into, which may install Python packages the answer doesn't have: `dockerfile`, `line`, `kind`
 (`may-install`) and `message`. An empty list means every line was read or can't install any; a script should treat a
-non-empty one as "this answer is not the whole image".
+non-empty one as "this answer is not the whole image". Each such line comes after the last install wheelgap read: one
+before it is an error instead. With `--dockerfile-inputs`, `summary.complete` says the same as a boolean: `false`
+when `dockerfile_warnings` lists a line, `true` when it is empty (absent without the flag). The exit code doesn't
+change for a warning.
 
 `results`, `rejected` and `via` are all keyed by target label: just the platform (`"linux-x86_64"`) when one Python is
 checked, or Python and platform (`"3.13 linux-x86_64"`) with several. The top-level `targets` list gives each target's
@@ -575,6 +578,10 @@ report, alongside whatever output mode you use. It has one testsuite per target 
 </testsuites>
 ```
 
+**After 0.13.0**, with `--dockerfile-inputs`, each line wheelgap couldn't see into ([`dockerfile_warnings`](#json)) is
+also a `<property name="wheelgap.dockerfile-warning" value="Dockerfile:8: …"/>` and a `system-out` line in every
+testsuite: it fails nothing, but the dashboard shows it.
+
 - A cell that fails the run is a failure: `missing`, `unknown`, and `source` unless `--fail-on missing`.
 - A transitive gap's failure or advisory-skip message names the direct dependency that pulls it
   in on that target, as the tables do: `source (via mcp)`, or `source (via mcp +2)`, and the element's text lists
@@ -610,7 +617,8 @@ another SARIF viewer), alongside whatever output mode you use. It has two rules,
   outside the repository, has no location: its gap still fails the job, but code scanning doesn't show it.
 - **After 0.13.0**, with `--dockerfile`, a note that the final image wasn't read ([`dockerfile_notes`](#json) of kind
   `image-not-read` or `image-libc`) is a `note` result of a third rule, `wheelgap/dockerfile-note`, at the `FROM`
-  line. The rule is listed only in a run that has such a result.
+  line. The rule is listed only in a run that has such a result. A line `--dockerfile-inputs` couldn't see into
+  ([`dockerfile_warnings`](#json)) is a `warning` result of `wheelgap/dockerfile-unseen` at that line.
 - `partialFingerprints` key a result by file, package and target, not version, so code scanning keeps one alert open
   across lockfile bumps until the gap goes away. A package that one file locks at several versions gets an alert per
   version.

@@ -1220,15 +1220,26 @@ _PACKAGE_PATH_WORDS = ("site-packages", "dist-packages", "venv", "virtualenv", "
 _PACKAGE_PATH_ROOTS = ("/", "/usr", "/usr/local", "/usr/lib", "/opt", "/root", "/home", "/install", "/app", "/srv")
 
 
+# Where the image's Python and pip, and the packages it imports first, live: a COPY --from into (or over) one of these
+# before an install may change the pip and Python it runs, which stops it. /root/.local and home folders hold the user
+# site-packages, which come before the image's own on sys.path.
+_PYTHON_HOMES = ("/usr/local/bin", "/usr/local/lib", "/usr/bin", "/usr/lib", "/bin", "/lib", "/root/.local", "/home")
+# What a path with Python in it looks like: a COPY --from with one is never only a note.
+_PYTHON_PATH_WORDS = (*_PACKAGE_PATH_WORDS, "pip", "lib", ".whl", ".egg", ".pth", ".py")
+
+
 def _may_hold_packages(copy: _Copy) -> bool:
-    """Whether a COPY --from may bring installed Python packages (an environment built in another stage)."""
-    paths = [posixpath.normpath(path) for path in (*copy.foreign_paths, copy.dest)]
-    return any(
-        path in _PACKAGE_PATH_ROOTS
-        or not path.startswith("/")
-        or any(word in path.lower() for word in _PACKAGE_PATH_WORDS)
-        for path in paths
-    )
+    """Whether a COPY --from may bring installed Python packages (an environment built in another stage): every
+    one does, unless it copies a single path that doesn't look like Python, and that is a file (it has a suffix) or
+    lands in a bin folder (`COPY --from=node /usr/local/bin/node /usr/local/bin/`). Telling a folder from a file
+    isn't possible from the Dockerfile, and a folder may be anything."""
+    if len(copy.foreign_paths) != 1:
+        return True
+    source = posixpath.normpath(copy.foreign_paths[0])
+    if any(word in path.lower() for path in (source, copy.dest) for word in _PYTHON_PATH_WORDS):
+        return True
+    into_bin = copy.dest in _BIN_DIRS or posixpath.dirname(copy.dest) in _BIN_DIRS or copy.dest.endswith("/bin")
+    return not (into_bin or "." in posixpath.basename(source).lstrip("."))
 
 
 def _copies_config(copy: _Copy, names: tuple[str, ...]) -> bool:
@@ -1967,6 +1978,8 @@ class _RunReader:
         # bin put first on the PATH, ("unknown", why) for a folder wheelgap knows nothing about.
         self.path: tuple[str, str] | None = None
         self.ambiguous: dict[str, int] = {}  # names an ENV and then an ARG set, by the ARG's line
+        # Folders an ENV HOME or XDG_CONFIG_* makes pip read a config file from, besides _CONFIG_PARENTS.
+        self.config_dirs: set[str] = set()
         self.system_before = 0  # how many of report.system_python come before the last install read
         # (line, word, folder) for each word of a command that wasn't read and may name a file it writes.
         self.mentions: list[tuple[int, str, str | None]] = []  # with the folder the command ran in, if known
@@ -2204,7 +2217,8 @@ class _RunReader:
                         f"line {number}: `{' '.join(texts)[:60]}` names {text}, which may be a pip or uv config file"
                     )
                     break
-                if (_config_folder(folder) or folder in self.venvs) and not self._copies_no_config(words):
+                configured = _config_folder(folder) or folder in self.venvs or _within(folder, self.config_dirs)
+                if configured and not self._copies_no_config(words):
                     self.config_error = (
                         f"line {number}: `{' '.join(texts)[:60]}` writes into {text}, where pip or uv may read a "
                         "config file"
@@ -2596,6 +2610,26 @@ def _not_newest(text: str) -> bool:
     return any(spec.operator not in (">=", ">") for spec in requirement.specifier)
 
 
+# ENV names that make Python use what a folder holds, and the ones that move where pip reads its config files.
+_PYTHON_PATH_VARIABLES = frozenset({"PATH", "PYTHONPATH", "VIRTUAL_ENV", "PYTHONHOME", "PYTHONUSERBASE"})
+_CONFIG_VARIABLES = frozenset({"HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"})
+
+
+def _within(path: str, folders: set[str] | tuple[str, ...]) -> bool:
+    """Whether `path` is one of `folders`, holds one, or is inside one."""
+    return any(
+        path == folder or folder.startswith(path.rstrip("/") + "/") or path.startswith(folder.rstrip("/") + "/")
+        for folder in folders
+    )
+
+
+def _config_dirs(name: str, folders: list[str]) -> set[str]:
+    """The folders pip reads a config file from when ENV `name` is `folders`."""
+    if name == "HOME":
+        return {posixpath.join(folder, sub) for folder in folders for sub in (".config/pip", ".pip")}
+    return {posixpath.join(folder, "pip") for folder in folders}
+
+
 def _names_config(text: str) -> bool:
     return any(word in text for word in _CONFIG_WORDS)
 
@@ -2927,6 +2961,9 @@ def _dockerfile_requirements(
         elif folder == "/" or folder.split("/")[1] in _IMAGE_FOLDERS:
             why = f"{folder} is a folder of the image, which may hold files"
         if why is None and folder is not None:
+            if copy := next((c for c in copies if c.foreign is not None and _within(c.dest, {folder})), None):
+                why = f"the COPY --from={copy.foreign} on line {copy.line} may put files in {folder}"
+        if why is None and folder is not None:
             for line, word, cwd in [*reader.mentions[: install.seen], *reader.created[: install.created]]:
                 if word.startswith("/") or cwd is not None:
                     path = posixpath.normpath(posixpath.join(cwd or "/", word))
@@ -2957,6 +2994,10 @@ def _dockerfile_requirements(
     global_defaults = global_args.defaults if not global_args.unreadable else {}
 
     def read_install(install: _Install) -> None:
+        if run_error:
+            raise DockerfileError(run_error)
+        if reader.config_error:
+            raise DockerfileError(reader.config_error)
         if install.unseen:
             # A line wheelgap can't see into may change what this install fetches (a requirements file, a pip config
             # file, PIP_ settings) or the pip and Python it runs: no answer is given. One after the last install
@@ -2969,10 +3010,6 @@ def _dockerfile_requirements(
                 "--dockerfile-inputs doesn't answer (such a line is only passed over, with a warning, after the "
                 "last install it reads)"
             )
-        if run_error:
-            raise DockerfileError(run_error)
-        if reader.config_error:
-            raise DockerfileError(reader.config_error)
         uv = install.uv
         if uv and (config := next((copy for copy in copies if _copies_config(copy, _UV_CONFIG_NAMES)), None)):
             if config.foreign is not None:
@@ -3099,10 +3136,16 @@ def _dockerfile_requirements(
                 _add_dir(dirs, workdir)
         elif keyword == "COPY":
             copies.append(copy := _read_copy(number, args, workdir, dirs, context, context_label, ignore_rules))
-            if _copies_config(copy, _PIP_CONFIG_NAMES):
+            if _copies_config(copy, _PIP_CONFIG_NAMES) or (
+                copy.foreign is not None and _within(copy.dest, reader.config_dirs)
+            ):
                 run_error = f"line {number}: a pip config file may change what pip installs"
-            elif copy.foreign is not None and _may_hold_packages(copy):
-                report.copied.append((number, f"COPY --from={copy.foreign} {' '.join(copy.foreign_paths)} {copy.dest}"))
+            if copy.foreign is not None and _may_hold_packages(copy):
+                what = f"COPY --from={copy.foreign} {' '.join(copy.foreign_paths)} {copy.dest}"
+                report.copied.append((number, what))
+                if _within(copy.dest, _PYTHON_HOMES) or _within(copy.dest, tuple(reader.venvs)):
+                    # It may put another pip or Python in place of the one a later install runs.
+                    report.unseen.append((number, f"copies files over the image's Python or pip ({what})"))
             elif copy.foreign is not None:
                 report.passed("copy-from", number)
         elif keyword == "ADD":
@@ -3162,6 +3205,38 @@ def _dockerfile_requirements(
                         if written is not None
                         else ("unknown", f"the {keyword} on line {number} sets PATH")
                     )
+                if name in _PYTHON_PATH_VARIABLES or name in _CONFIG_VARIABLES:
+                    written = _written_value(args, name) if keyword == "ENV" else value
+                    folders = [
+                        posixpath.normpath(entry)
+                        for entry in (written or "").split(":")
+                        if entry.startswith("/") and "$" not in entry
+                    ]
+                    foreign = [copy for copy in copies if copy.foreign is not None and not copy.uv_binaries]
+                    if name in _CONFIG_VARIABLES:
+                        # pip reads a config file from under these: a copied folder there may bring one.
+                        if written is None or len(folders) != len((written or "").split(":")):
+                            run_error = (
+                                f"line {number}: {keyword} {name} moves where pip reads its config, to a folder "
+                                "wheelgap can't tell"
+                            )
+                        reader.config_dirs.update(_config_dirs(name, folders))
+                        if config := next((c for c in foreign if _within(c.dest, reader.config_dirs)), None):
+                            run_error = (
+                                f"line {number}: {keyword} {name} makes pip read its config from a folder the COPY "
+                                f"--from={config.foreign} on line {config.line} brought, which may hold a pip.conf"
+                            )
+                    elif hit := next(
+                        ((c, f) for f in folders for c in foreign if _within(c.dest, {f}) or _within(f, {c.dest})),
+                        None,
+                    ):
+                        copy, folder = hit
+                        what = (
+                            f"{keyword} {name} names {folder}, which the COPY --from={copy.foreign} on line "
+                            f"{copy.line} brought"
+                        )
+                        report.copied.append((number, what))
+                        report.unseen.append((number, f"uses files copied from another stage or image ({what})"))
                 if _installer_setting(name):
                     # The value is left out: an index URL may hold credentials.
                     run_error = f"line {number}: {keyword} {name} may change what pip or uv installs"

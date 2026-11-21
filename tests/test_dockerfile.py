@@ -3536,9 +3536,16 @@ def test_dockerfile_requirements_stops_on_what_a_parent_stage_does(tmp_path, doc
 @pytest.mark.parametrize(
     ("copy", "warns"),
     [
-        ("COPY --from=web /app/dist /srv/static", False),
-        ("COPY --from=web --chown=app:app /src/build ./static/", False),
+        # Only a single path that doesn't look like Python, and is a file or lands in a bin folder, is a note.
+        ("COPY --from=web /app/dist/main.js /srv/static/", False),
+        ("COPY --from=web /etc/ssl/certs/ca.pem /etc/ssl/certs/", False),
         ("COPY --link --from=docker.io/library/busybox:1.36 /bin/busybox /usr/local/bin/busybox", False),
+        ("COPY --from=ghcr.io/example/tool:1 /tool /usr/local/bin/", False),
+        # A folder may hold anything, so every other copy is a warning.
+        ("COPY --from=web /app/dist /srv/static", True),
+        ("COPY --from=web --chown=app:app /src/build ./static/", True),
+        ("COPY --from=web /a.js /b.js /srv/static/", True),
+        ("COPY --from=builder /usr/local/bin/python3.13 /usr/local/bin/", True),
         # Paths that may hold installed Python packages: the answer says it doesn't cover them.
         ("COPY --from=builder /opt/venv /opt/venv", True),
         ("COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages", True),
@@ -3546,7 +3553,7 @@ def test_dockerfile_requirements_stops_on_what_a_parent_stage_does(tmp_path, doc
         ("COPY --from=builder /install /usr/local", True),
         ("COPY --from=builder /build/wheels /wheels", True),
         ("COPY --from=builder /root/.local /opt/user", True),
-        ("COPY --from=builder /src/app .", False),
+        ("COPY --from=builder /src/app .", True),
         ("COPY --from=0 /app /app", True),
     ],
 )
@@ -3625,16 +3632,17 @@ def test_cli_dockerfile_inputs_reads_a_multi_stage_dockerfile(tmp_path, capsys, 
     data = json.loads(captured.out)
     assert [p["name"] for p in data["packages"]] == ["purewheel"]
     assert data["dockerfile_inputs"] == [{"dockerfile": str(path), "line": 8, "file": "requirements.txt"}]
-    assert [(w["line"], w["kind"]) for w in data["dockerfile_warnings"]] == [(9, "may-bring"), (11, "may-install")]
+    warnings = [(w["line"], w["kind"]) for w in data["dockerfile_warnings"]]
+    assert warnings == [(9, "may-bring"), (10, "may-bring"), (11, "may-install")]
     assert "COPY --from=builder /usr/local/lib/python3.12/dist-packages" in data["dockerfile_warnings"][0]["message"]
     kinds = [(n["kind"], n.get("lines")) for n in data["dockerfile_notes"]]
-    assert kinds == [("image-not-read", None), ("passed-over:system-packages", [2]), ("passed-over:copy-from", [10])]
+    assert kinds == [("image-not-read", None), ("passed-over:system-packages", [2])]
     assert f"wheelgap: warning: {path}:9: COPY --from=builder " in captured.err
     assert "copies files from another stage or image, which wheelgap doesn't follow" in captured.err
     assert main(argv) == 0
     out = capsys.readouterr().out
     assert out.rstrip().endswith(
-        f"! {path} lines 9, 11 run commands wheelgap can't see into, or copy files from another stage or image: "
+        f"! {path} lines 9, 10, 11 run commands wheelgap can't see into, or copy files from another stage or image: "
         "any Python packages they bring are not in this answer."
     )
 
@@ -4039,3 +4047,77 @@ def test_dockerfile_requirements_name_globs_and_paths(tmp_path, head, files, run
 def test_dockerfile_requirements_reads_names_no_file_can_match(tmp_path, head, run, names):
     _, report = _named(tmp_path, f"RUN {run}\n", head=f"FROM python:3.13\n{head}")
     assert report.named == [(head.count("\n") + 2, names, False)]
+
+
+_M8_HEAD = "FROM python:3.13 AS build\nRUN pip install --target=/packages idna==3.10\nFROM python:3.13\nWORKDIR /app\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        # A copied folder the image's Python then uses, before an install: it may bring another pip.
+        (
+            "COPY --from=build /packages /packages\nENV PYTHONPATH=/packages\nCOPY requirements.txt .\n" + _INSTALL,
+            ":6: this line uses files copied from another stage or image \\(ENV PYTHONPATH names /packages",
+        ),
+        (
+            "COPY --from=build /opt/env /opt/env\nENV PATH=/opt/env/bin:$PATH\nCOPY requirements.txt .\n" + _INSTALL,
+            ":8: .*pip may not be the image.s own, since ENV PATH on line 6 puts /opt/env/bin first",
+        ),
+        (
+            "COPY --from=build /packages /usr/local/lib/python3.13/site-packages\nCOPY requirements.txt .\n" + _INSTALL,
+            ":5: this line copies files over the image's Python or pip",
+        ),
+        (
+            "COPY --from=build /root/.local /root/.local\nCOPY requirements.txt .\n" + _INSTALL,
+            ":5: this line copies files over the image's Python or pip",
+        ),
+        ("COPY --from=build /usr/local /usr/local\nCOPY requirements.txt .\n" + _INSTALL, ":5: a pip config file"),
+        # Where pip reads its config from, moved to a copied folder (or a copy into where it was moved).
+        (
+            "COPY --from=build /cfg /cfg\nENV HOME=/cfg\nCOPY requirements.txt .\n" + _INSTALL,
+            ":6: ENV HOME makes pip read its config from a folder the COPY --from=build on line 5 brought",
+        ),
+        (
+            "COPY --from=build /cfg /etc/cfg\nENV XDG_CONFIG_DIRS=/etc/cfg\nCOPY requirements.txt .\n" + _INSTALL,
+            ":6: ENV XDG_CONFIG_DIRS makes pip read its config from a folder",
+        ),
+        (
+            "ENV HOME=/srv/me\nCOPY --from=build /cfg /srv/me/.config\nCOPY requirements.txt .\n" + _INSTALL,
+            ":6: a pip config file may change what pip installs",
+        ),
+        ("ENV HOME=$X\nCOPY requirements.txt .\n" + _INSTALL, ":5: ENV HOME moves where pip reads its config"),
+        # An unquoted name[extra] in a folder a COPY --from wrote to.
+        (
+            "COPY --from=build /x /app/x\nRUN pip install six[a]\n",
+            "the COPY --from=build on line 5 may put files in /app",
+        ),
+    ],
+)
+def test_dockerfile_requirements_stops_on_what_a_copy_from_may_change(tmp_path, body, error):
+    with pytest.raises(DockerfileError, match=error):
+        dockerfile_requirements(_context(tmp_path, _M8_HEAD + body), report=InputsReport())
+
+
+def test_dockerfile_requirements_warns_about_packages_copied_from_a_build_stage(tmp_path):
+    # M8: the final image has idna from the build stage; the answer is six alone, so it must say so.
+    body = "COPY requirements.txt .\n" + _INSTALL + "COPY --from=build /packages /packages\nENV PYTHONPATH=/packages\n"
+    report = InputsReport()
+    assert [line for line, _ in dockerfile_requirements(_context(tmp_path, _M8_HEAD + body), report=report)] == [6]
+    assert [line for line, _ in report.copied] == [7, 8]
+    assert "ENV PYTHONPATH names /packages, which the COPY --from=build on line 7 brought" in report.copied[1][1]
+    assert report.passed_over.get("copy-from") is None
+    # A copy that can't replace the image's Python, before the install, is a warning too, not a stop.
+    body = "COPY --from=build /app/static ./static\nCOPY requirements.txt .\n" + _INSTALL
+    report = InputsReport()
+    assert [line for line, _ in dockerfile_requirements(_context(tmp_path, _M8_HEAD + body), report=report)] == [7]
+    assert [line for line, _ in report.copied] == [5]
+
+
+def test_cli_dockerfile_inputs_says_a_single_copied_file_is_not_followed(tmp_path, capsys, fake_pypi):
+    body = "COPY --from=build /bin/tool /usr/local/bin/\nCOPY requirements.txt .\n" + _INSTALL
+    path = _context(tmp_path, _M8_HEAD + body)
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    captured = capsys.readouterr()
+    [note] = [n for n in json.loads(captured.out)["dockerfile_notes"] if n["kind"] == "passed-over:copy-from"]
+    assert note["message"] == "not followed: files copied from another stage or image, line 5"

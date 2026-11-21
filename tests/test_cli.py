@@ -385,6 +385,31 @@ def test_requirements_line_pip_cant_split_exits_2(capsys, tmp_path, fake_pypi):
     assert "requirements.txt" in err and "-r 'unclosed" in err
 
 
+def test_requirements_missing_include_exits_2_with_the_line(capsys, fake_pypi, tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("purewheel==3.1\n-r _base.txt\n", encoding="utf-8")
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64")
+    assert (code, out, err) == (2, "", "wheelgap: error: requirements.txt:2: -r _base.txt: file not found\n")
+    assert fake_pypi == []
+    code, out, _ = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "--json")
+    assert code == 2
+    assert json.loads(out)["error"]["message"] == "requirements.txt:2: -r _base.txt: file not found"
+
+
+def test_requirement_line_no_binary_is_honoured_as_pip_does(capsys, fake_pypi, tmp_path):
+    # pip 26.3 takes no wheel for either here: --no-binary after a requirement counts for the whole install.
+    # (The fake purewheel has no sdist, so with its wheel ruled out nothing is left.)
+    req = tmp_path / "requirements.txt"
+    req.write_text("purewheel==3.1\nfastlib==2.0.0 --no-binary purewheel,fastlib\n", encoding="utf-8")
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "--json")
+    results = {p["name"]: p["results"]["linux-x86_64"] for p in json.loads(out)["packages"]}
+    assert results == {"fastlib": "source", "purewheel": "missing"} and code == 1
+    req.write_text("purewheel==3.1\nfastlib==2.0.0\n", encoding="utf-8")
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "--json")
+    results = {p["name"]: p["results"]["linux-x86_64"] for p in json.loads(out)["packages"]}
+    assert results == {"fastlib": "wheel", "purewheel": "wheel"} and code == 0
+
+
 def test_requirements_include_cycle_exits_2(capsys, tmp_path, monkeypatch):
     # pip refuses an include cycle, so wheelgap does too: exit code 2, and the same error with
     # --github-annotations, since the file is parsed before any line is looked up (#603).

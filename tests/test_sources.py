@@ -464,10 +464,11 @@ def test_requirements_symlinked_file_missing_include_names_the_path_pip_would_op
     (tmp_path / "real" / "reqs.txt").write_text("-r base.txt\n", encoding="utf-8")
     (tmp_path / "real" / "base.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
     _try_symlink(Path("../real/reqs.txt"), tmp_path / "link" / "reqs.txt")
-    with pytest.raises(FileNotFoundError) as caught:
+    with pytest.raises(SourceError, match=r"^reqs\.txt:1: -r base\.txt: file not found$") as caught:
         parse_requirements(tmp_path / "link" / "reqs.txt")
     # The filename, not str(error): that shows the path's repr, with doubled backslashes on Windows.
-    assert Path(caught.value.filename) == tmp_path / "link" / "base.txt"
+    assert isinstance(caught.value.__cause__, FileNotFoundError)
+    assert Path(caught.value.__cause__.filename) == tmp_path / "link" / "base.txt"
 
 
 def test_requirements_file_reached_by_two_names_lists_packages_once(tmp_path):
@@ -2241,6 +2242,108 @@ def test_requirements_binary_format_control(tmp_path, lines, expected):
     assert {name: (pkgs[name].no_binary, pkgs[name].only_binary) for name in expected} == expected
 
 
+@pytest.mark.parametrize(
+    "lines, expected",
+    [
+        # Each row is what pip 26.3 does (pip install --dry-run -r FILE): the option counts for the whole install,
+        # like the same option on a line of its own, wherever the requirement that carries it is.
+        ("fastlib>=2 --no-binary fastlib\n", {"fastlib": (True, False)}),
+        (
+            "fastlib>=2 --no-binary fastlib,purewheel\npurewheel==3.1\n",
+            {"fastlib": (True, False), "purewheel": (True, False)},
+        ),
+        ("purewheel==3.1\nfastlib==2.0.0 --no-binary :all:\n", {"fastlib": (True, False), "purewheel": (True, False)}),
+        (
+            "fastlib==2.0.0 --no-binary purewheel\npurewheel==3.1\n",
+            {"fastlib": (False, False), "purewheel": (True, False)},
+        ),
+        ("fastlib==2.0.0 --only-binary=fastlib\n", {"fastlib": (False, True)}),
+        ("fastlib==2.0.0 --no-binary=fastlib --only-binary=fastlib\n", {"fastlib": (False, True)}),
+        ("--only-binary :all:\nfastlib==2.0.0 --no-binary fastlib\n", {"fastlib": (True, False)}),
+        ("fastlib==2.0.0 ; python_version >= '3.8' --no-binary fastlib\n", {"fastlib": (True, False)}),
+        ("fastlib==2.0.0 --hash=sha256:aa --no-binary fastlib --hash sha256:bb\n", {"fastlib": (True, False)}),
+        ("fastlib==2.0.0 \\\n    --no-binary fastlib\n", {"fastlib": (True, False)}),
+        ("fastlib==2.0.0 --config-settings a=b -C c=d -Ce=f --config-setting=g=h\n", {"fastlib": (False, False)}),
+    ],
+)
+def test_requirements_format_options_after_a_requirement(tmp_path, lines, expected):
+    req = tmp_path / "requirements.txt"
+    req.write_text(lines, encoding="utf-8")
+    source = parse_requirements(req)
+    pkgs = by_name(source)
+    assert {name: (pkgs[name].no_binary, pkgs[name].only_binary) for name in expected} == expected
+    assert all(not p.skip and not p.error for p in source.packages)
+    assert all(" -" not in spec for spec in source.specs)  # --deps resolves the requirement, not its options
+
+
+def test_requirements_options_after_a_requirement_keep_its_pin_and_hash_mode(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("fastlib==2.0.0 --no-binary fastlib --hash=sha256:aa\npurewheel>=3 --only-binary purewheel\n")
+    source = parse_requirements(req)
+    assert [(p.name, p.version, p.spec) for p in source.packages] == [
+        ("fastlib", "2.0.0", None),
+        ("purewheel", None, ">=3"),
+    ]
+    assert source.compiled and source.specs == ["fastlib==2.0.0", "purewheel>=3"]
+
+
+@pytest.mark.parametrize(
+    "line, message",
+    [
+        # pip takes these after a requirement and ignores them; the first three would change the answer on a
+        # line of their own, so wheelgap doesn't guess what the author meant.
+        ("fastlib>=2 --pre", "requirements.txt:2: wheelgap doesn't read --pre after a requirement, only --hash,"),
+        (
+            "fastlib>=2 --index-url https://example.invalid/simple",
+            "requirements.txt:2: wheelgap doesn't read --index-url",
+        ),
+        ("fastlib>=2 -r more.txt", "requirements.txt:2: wheelgap doesn't read -r after a requirement"),
+        ("fastlib>=2 --prefer-binary", "requirements.txt:2: wheelgap doesn't read --prefer-binary"),
+        # pip refuses these: "no such option", "--no-binary option requires 1 argument".
+        ("fastlib>=2 --bogus-option x", "requirements.txt:2: wheelgap doesn't read --bogus-option after a requirement"),
+        ("fastlib>=2 --global-option=x", "requirements.txt:2: wheelgap doesn't read --global-option=x"),
+        ("fastlib>=2 --no-binary", "requirements.txt:2: --no-binary needs a value, as in pip"),
+        ("fastlib>=2 --hash", "requirements.txt:2: --hash needs a value, as in pip"),
+        ("fastlib>=2 --no-binary 'fastlib", "requirements.txt:2: pip can't split this line (an unclosed quote?)"),
+    ],
+)
+def test_requirements_other_options_after_a_requirement_are_refused(tmp_path, line, message):
+    req = tmp_path / "requirements.txt"
+    req.write_text(f"purewheel==3.1\n{line}\n", encoding="utf-8")
+    with pytest.raises(SourceError, match=re.escape(message)):
+        parse_requirements(req)
+
+
+@pytest.mark.parametrize(
+    "top, message",
+    [
+        ("purewheel==3.1\n-r missing.txt\n", "requirements.txt:2: -r missing.txt: file not found"),
+        ("--requirement=missing.txt\n", "requirements.txt:1: --requirement=missing.txt: file not found"),
+        ("# pins\n\n-c missing.txt\npurewheel\n", "requirements.txt:3: -c missing.txt: file not found"),
+        (
+            "purewheel==3.1 \\\n  --hash=sha256:aa\n-r sub/missing.txt\n",
+            "requirements.txt:3: -r sub/missing.txt: file not found",
+        ),
+        ("-r sub/next.txt\n", "sub/next.txt:2: -r gone.txt: file not found"),  # the file that has the line
+        ("-c sub/cons.txt\n", "sub/cons.txt:1: -r gone.txt: file not found"),
+        ("-r sub\n", "requirements.txt:1: -r sub: "),  # a folder: the system's own words (pip: "Is a directory")
+    ],
+)
+def test_requirements_include_that_cannot_be_read_names_the_file_and_line(tmp_path, top, message):
+    # pip stops too ("Could not open requirements file"); before, this was a bare "[Errno 2] No such file ...".
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "next.txt").write_text("purewheel==3.1\n-r gone.txt\n", encoding="utf-8")
+    (tmp_path / "sub" / "cons.txt").write_text("-r gone.txt\n", encoding="utf-8")
+    req = tmp_path / "requirements.txt"
+    req.write_text(top, encoding="utf-8")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(req)
+    assert str(caught.value).startswith(message) and "Errno" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+    if "file not found" in message:
+        assert str(caught.value) == message
+
+
 def test_requirements_binary_format_control_with_includes(tmp_path):
     (tmp_path / "base.txt").write_text("--no-binary :all:\npurewheel==3.1\n", encoding="utf-8")
     (tmp_path / "override.txt").write_text("--only-binary purewheel\n", encoding="utf-8")
@@ -2360,3 +2463,19 @@ def test_uv_build_policy_rejects_a_tool_key_that_isnt_a_table(tmp_path):
     (tmp_path / "pyproject.toml").write_text('tool = "uv"\n', encoding="utf-8")
     with pytest.raises(SourceError, match=r"\[tool\] must be a table"):
         load_inputs([str(tmp_path)])
+
+
+def test_requirements_option_after_a_requirement_counts_each_time_the_file_is_read(tmp_path):
+    # pip 26.3 reads b.txt twice, so its --no-binary comes after the --only-binary line: pip takes the sdist.
+    (tmp_path / "b.txt").write_text("fastlib==2.0.0 --no-binary fastlib\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("-r b.txt\n--only-binary fastlib\n-r b.txt\n", encoding="utf-8")
+    pkgs = by_name(parse_requirements(tmp_path / "requirements.txt"))
+    assert (pkgs["fastlib"].no_binary, pkgs["fastlib"].only_binary) == (True, False)
+
+
+def test_requirements_tab_before_an_option_is_one_requirement_as_in_pip(tmp_path):
+    # pip splits at single spaces: "fastlib==2.0.0<TAB>--no-binary" is one word, and an invalid requirement.
+    req = tmp_path / "requirements.txt"
+    req.write_text("fastlib==2.0.0\t--no-binary fastlib\n", encoding="utf-8")
+    with pytest.raises(SourceError, match="can't parse requirement"):
+        parse_requirements(req)

@@ -932,7 +932,7 @@ def _diff_lockfiles(args: dict[str, Any]) -> dict[str, Any]:
         targets = make_targets(_pythons(args) or None, _platforms(args) or None, **_versions(args))
     except TargetError as e:
         raise ToolError(str(e)) from e
-    if not _platforms(args):  # as `wheelgap diff`: the default platforms both locks cover
+    if not _platforms(args):  # as `wheelgap diff`: without the default platforms both locks leave out
         targets = diff.lock_default_targets(paths, targets)[0]
     sides = []
     for path in paths:

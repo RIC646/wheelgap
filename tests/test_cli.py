@@ -1493,6 +1493,12 @@ def test_lock_environments_narrow_the_default_targets_in_diff(capsys, fake_pypi,
     old.write_text(environments_lock(), encoding="utf-8")
     code, _, err = run(capsys, "diff", str(old), str(new), "-p", "3.12")
     assert code == 2 and "this lock doesn't cover macos-arm64, win-amd64" in err
+    # A side that isn't a uv.lock leaves out nothing, so nothing is dropped: the platforms the lock gives up are refused.
+    req = tmp_path / "requirements.txt"
+    req.write_text("markupsafe==3.0.2\n", encoding="utf-8")
+    old.write_text(environments_lock("sys_platform == 'linux'"), encoding="utf-8")
+    assert run(capsys, "diff", str(req), str(new), "-p", "3.12")[0] == 2
+    assert run(capsys, "diff", str(new), str(req), "-p", "3.12")[0] == 2
 
 
 def test_lock_environments_leave_out_advisory_targets(capsys, fake_pypi, tmp_path):

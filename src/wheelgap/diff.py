@@ -416,16 +416,17 @@ def main(argv: list[str] | None = None, prog: str = "python -m wheelgap.diff") -
 
 def lock_default_targets(paths: list[Path], targets: list[Target]) -> tuple[list[Target], str | None]:
     """The default targets without the platforms both sides' uv.lock `[tool.uv] environments` leave out (a platform
-    only one side leaves out stays, and is refused), with the note to print. A file that can't be read here is left
-    for the check to report."""
+    only one side leaves out stays, and is refused), with the note to print. A side that isn't a uv.lock leaves out
+    nothing, so then nothing goes; a file that can't be read here is left for the check to report."""
     sources = []
     for path in paths:
         try:
             lock = find_lockfile(path) if path.is_dir() else path
-            if file_kind(lock) == "uv" and lock.is_file():
-                sources.append(parse_uv_lock(lock))
+            if file_kind(lock) != "uv" or not lock.is_file():
+                return targets, None
+            sources.append(parse_uv_lock(lock))
         except (OSError, ValueError):
-            pass
+            return targets, None
     narrowed, left_out = narrow_to_lock_environments(sources, targets, every=True)
     return narrowed, lock_environments_note(sources, left_out, narrowed, "default targets") if left_out else None
 

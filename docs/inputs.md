@@ -152,8 +152,9 @@ lockfile's supported environments"). wheelgap follows uv:
   change this: it can look up the wheels again, but not the packages the lock left out;
 - the built-in default platforms are narrowed to the ones the lock covers, with a note on stderr, so
   `wheelgap uv.lock` on a Linux-only lock checks `linux-x86_64` and `linux-aarch64`. A default platform the lock
-  covers for only some of the Pythons you asked for stays, and is the error above. `wheelgap diff` narrows them to
-  the platforms both locks cover, so a platform the new lock gives up is the error above too;
+  covers for only some of the Pythons you asked for stays, and is the error above. `wheelgap diff` drops only the
+  platforms both locks leave out, so a platform one lock covers and the other doesn't (one the new lock gives up or
+  adds) is the error above too, and so is any platform when one side isn't a `uv.lock`;
 - an [`--advisory`](cli.md#advisory) target the lock leaves out isn't checked, with a note, since it never fails the
   run.
 

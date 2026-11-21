@@ -2398,22 +2398,26 @@ def _read_requirements(
                 if format_control is not None:
                     _apply_format_options(line, format_control)
                 continue  # pip options: --index-url, --no-binary, --hash continuation, ...
+            # The requirement ends where pip ends it: before the first word, split at single spaces, that starts
+            # with "-" (break_args_options), so "name\t--no-binary x" is one requirement pip can't parse. The rest is
+            # options: --hash=sha256:..., "--hash sha256:...", --no-binary NAMES.
+            words = line.split(" ")
+            first_option = next((k for k, word in enumerate(words) if word.startswith("-")), len(words))
+            options = " ".join(word for word in words[first_option:] if word)
+            hashed = False
+            if options:
+                where = _shown(path, stack) + (f":{number}" if number is not None else "")
+                hashed, formats = _requirement_options(options, where)
+                if formats and format_control is not None:
+                    # Each time the line is read, as for an option line: pip reads a file included twice twice,
+                    # and the later option wins.
+                    _apply_format_options(options, format_control)
             if already_seen:
                 continue
-            # The requirement ends where pip ends it: before the first space-separated word that starts with "-"
-            # (break_args_options). The rest is options: --hash=sha256:..., "--hash sha256:...", --no-binary NAMES.
-            words = line.split()  # any whitespace, as before: pip splits at single spaces only
-            first_option = next((k for k, word in enumerate(words) if word.startswith("-")), len(words))
-            if first_option < len(words):
-                where = _shown(path, stack) + (f":{number}" if number is not None else "")
-                options = " ".join(words[first_option:])
-                hashed, formats = _requirement_options(options, where)
-                # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.
-                if hashed and compiler_signs is not None and not constraint:
-                    compiler_signs.append("hash")
-                if formats and format_control is not None:
-                    _apply_format_options(options, format_control)
-            line = " ".join(words[:first_option])
+            # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.
+            if hashed and compiler_signs is not None and not constraint:
+                compiler_signs.append("hash")
+            line = " ".join(words[:first_option]).strip()
             if line.startswith((".", "/")):
                 append(Package(line, None, skip="path", origin=path.name))
                 continue

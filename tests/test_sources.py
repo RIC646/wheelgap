@@ -2463,3 +2463,19 @@ def test_uv_build_policy_rejects_a_tool_key_that_isnt_a_table(tmp_path):
     (tmp_path / "pyproject.toml").write_text('tool = "uv"\n', encoding="utf-8")
     with pytest.raises(SourceError, match=r"\[tool\] must be a table"):
         load_inputs([str(tmp_path)])
+
+
+def test_requirements_option_after_a_requirement_counts_each_time_the_file_is_read(tmp_path):
+    # pip 26.3 reads b.txt twice, so its --no-binary comes after the --only-binary line: pip takes the sdist.
+    (tmp_path / "b.txt").write_text("fastlib==2.0.0 --no-binary fastlib\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("-r b.txt\n--only-binary fastlib\n-r b.txt\n", encoding="utf-8")
+    pkgs = by_name(parse_requirements(tmp_path / "requirements.txt"))
+    assert (pkgs["fastlib"].no_binary, pkgs["fastlib"].only_binary) == (True, False)
+
+
+def test_requirements_tab_before_an_option_is_one_requirement_as_in_pip(tmp_path):
+    # pip splits at single spaces: "fastlib==2.0.0<TAB>--no-binary" is one word, and an invalid requirement.
+    req = tmp_path / "requirements.txt"
+    req.write_text("fastlib==2.0.0\t--no-binary fastlib\n", encoding="utf-8")
+    with pytest.raises(SourceError, match="can't parse requirement"):
+        parse_requirements(req)

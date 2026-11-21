@@ -936,6 +936,8 @@ def _diff_lockfiles(args: dict[str, Any]) -> dict[str, Any]:
         targets = make_targets(_pythons(args) or None, _platforms(args) or None, **_versions(args))
     except TargetError as e:
         raise ToolError(str(e)) from e
+    if not _platforms(args):  # as `wheelgap diff`: without the default platforms both locks leave out
+        targets = diff.lock_default_targets(paths, targets)[0]
     sides = []
     for path in paths:
         try:
@@ -1120,7 +1122,10 @@ def _run_cli(
     # SystemExit is a BaseException: without the handler above it would end the server, not just this call.
     if code not in (0, 1):
         errors = [m.removeprefix("error: ") for m in messages if not m.startswith("note: ")]
-        raise ToolError("; ".join(errors) or f"wheelgap exited with status {code}")
+        # An indented line continues the error above it (the files a directory leaves to choose from): it stays a
+        # line of its own.
+        text = "".join(("\n" if m.startswith(" ") else "; ") + m for m in errors).removeprefix("; ")
+        raise ToolError(text or f"wheelgap exited with status {code}")
     data = json.loads(out.getvalue())
     # The CLI leaves the Python out of labels when there's only one; always give it, as check_package does.
     label = {t["label"]: f"{t['python']} {t['platform']}" for t in data["targets"]}

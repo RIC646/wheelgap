@@ -39,7 +39,7 @@ pipx run wheelgap
 
 Or install it: `pip install wheelgap`.
 
-Run either one in a project directory. It finds `uv.lock`, `pylock.toml`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`, `requirements.txt`, `requirements.lock` or `pixi.lock` on its own. [Getting started](https://wheelgap.github.io/wheelgap/getting-started/) walks through a first run.
+Run either one in a project directory. It finds `uv.lock`, `pylock.toml`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`, `requirements.txt`, `requirements.lock` or `pixi.lock` on its own. Without one of those it checks the dependencies in `pyproject.toml`, or the project's one requirements file under another name or in a subfolder, and says which file it read (after 0.13.0). [Getting started](https://wheelgap.github.io/wheelgap/getting-started/) walks through a first run.
 
 ## Usage
 
@@ -226,7 +226,7 @@ This checks both lockfiles and lists the packages that got worse on a target (a 
 
 - **Lockfiles are read offline.** `uv.lock` (and a script's `example.py.lock`), `pylock.toml`, `poetry.lock` and `pdm.lock` already record every file published for each pinned version. wheelgap parses the wheel filenames' tags with [`packaging`](https://packaging.pypa.io/) and checks them against the exact tag set each target accepts. That is the same logic pip and uv use to pick a wheel.
 - **`requirements.txt`, `Pipfile.lock`, `pixi.lock`, `environment.yml`, `pyproject.toml`, a script's `# /// script` block and bare package names** are looked up on the PyPI JSON API (or your `--index-url`). wheelgap checks the requirements you give it and doesn't resolve dependencies, except for package names, requirements files, `environment.yml`, `pyproject.toml` and scripts with `--deps`, which resolves what they install per target from PyPI's metadata. For `pyproject.toml`, `--group NAME` also checks a PEP 735 dependency group and `--only-group NAME` checks just the named groups (no group is selected by default). If the file has groups but no `[project]` table, select a group explicitly with either flag.
-- **Environment markers are respected.** A `pywin32 ; sys_platform == 'win32'` dependency won't show up as a Linux gap. For `uv.lock` the dependency graph is walked per target, so transitive platform-specific packages are handled too.
+- **Environment markers are respected.** A `pywin32 ; sys_platform == 'win32'` dependency won't show up as a Linux gap. For `uv.lock` the dependency graph is walked per target, so transitive platform-specific packages are handled too. A `uv.lock` limited by `[tool.uv] environments` is checked only where uv installs it (after 0.13.0): a target outside its environments is an error, not a list of false gaps.
 - **No guessing.** Where wheelgap can't be sure, it says `unknown`, which counts as a gap, rather than guess.
 
 [How it works](https://wheelgap.github.io/wheelgap/how-it-works/) covers version ranges, `--online` and `--offline`, the lookup cache and private indexes, and the [FAQ](https://wheelgap.github.io/wheelgap/faq/) answers "why does it say source when pip installs a wheel?".

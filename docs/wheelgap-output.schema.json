@@ -231,7 +231,7 @@
                 },
                 "complete": {
                     "type": "boolean",
-                    "description": "With --dockerfile-inputs (after 0.13.0), false when dockerfile_warnings lists a line wheelgap couldn't see into, which may install Python packages the answer doesn't have. Absent without the flag."
+                    "description": "With --dockerfile-inputs (after 0.13.0), false when dockerfile_warnings lists a line wheelgap couldn't see into, which may install Python packages the answer doesn't have, or when -p and -t stood in for an image wheelgap couldn't read. Absent without the flag."
                 }
             }
         }

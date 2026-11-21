@@ -485,7 +485,7 @@ couldn't see into, which may install Python packages the answer doesn't have: `d
 (`may-install`) and `message`. An empty list means every line was read or can't install any; a script should treat a
 non-empty one as "this answer is not the whole image". Each such line comes after the last install wheelgap read: one
 before it is an error instead. With `--dockerfile-inputs`, `summary.complete` says the same as a boolean: `false`
-when `dockerfile_warnings` lists a line, `true` when it is empty (absent without the flag). The exit code doesn't
+when `dockerfile_warnings` lists a line or `-p` and `-t` stood in for an image wheelgap couldn't read (the headline then says so too), `true` otherwise (absent without the flag). The exit code doesn't
 change for a warning.
 
 `results`, `rejected` and `via` are all keyed by target label: just the platform (`"linux-x86_64"`) when one Python is

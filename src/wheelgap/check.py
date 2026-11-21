@@ -632,6 +632,36 @@ def check_lock_environments(source: Source, targets: Iterable[Target]) -> None:
     )
 
 
+def narrow_to_lock_environments(
+    sources: Iterable[Source], targets: list[Target], *, every: bool = False
+) -> tuple[list[Target], list[str]]:
+    """Targets nobody named (the default platforms, or --advisory ones) without the platforms a uv.lock made with
+    `[tool.uv] environments` leaves out for every Python asked for, and those platforms. With several locks a
+    platform goes when one of them leaves it out; with every=True (`wheelgap diff`) only when all of them do, so a
+    platform one side gives up stays and check_lock_environments refuses it. A platform covered for some of the
+    Pythons only stays, and is refused there too. Nothing goes when no target would be left."""
+    sources = list(sources)
+    if not any(source.supported_markers for source in sources):
+        return targets, []
+    # A lock without environments leaves nothing out, so with every=True it keeps every platform.
+    outside = [set(lock_environment_targets(source, targets)[0]) for source in sources]
+    unlocked = set.intersection(*outside) if every else set.union(*outside)
+    locked = {t.platform for t in targets if t not in unlocked}
+    left_out = list(dict.fromkeys(t.platform for t in targets if t.platform not in locked))
+    if not locked or not left_out:
+        return targets, []
+    return [t for t in targets if t.platform in locked], left_out
+
+
+def lock_environments_note(sources: Iterable[Source], left_out: list[str], kept: list[Target], what: str) -> str:
+    labels = ", ".join(dict.fromkeys(source.label for source in sources if source.supported_markers))
+    checked = ", ".join(dict.fromkeys(t.platform for t in kept))
+    return (
+        f"{labels} is locked for `[tool.uv] environments` only, which leave out {', '.join(left_out)}: "
+        f"checking the {what} it covers ({checked})"
+    )
+
+
 # How a package was reached: the index of the package that depends on it, the name of the
 # dependency group that lists it, or None for a root or a top-level requirement.
 Parent = int | str | None

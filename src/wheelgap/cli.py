@@ -38,7 +38,9 @@ from .check import (
     explain,
     explain_lines,
     lock_environment_targets,
+    lock_environments_note,
     marker_holds,
+    narrow_to_lock_environments,
     reachable,
 )
 from .codequality import write_codequality
@@ -2092,19 +2094,26 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             # Nobody asked for these platforms, so a uv.lock made with [tool.uv] environments is checked on the
             # default platforms it was locked for. One it covers for some of the Pythons only stays, and is an
             # error below, as a platform that was asked for is.
-            unlocked = [target for source in sources for target in lock_environment_targets(source, targets)[0]]
-            locked = {t.platform for t in targets if t not in unlocked}
-            left_out = list(dict.fromkeys(t.platform for t in targets if t.platform not in locked))
-            if locked and left_out:
+            targets, left_out = narrow_to_lock_environments(sources, targets)
+            if left_out and not quiet:
+                note = lock_environments_note(sources, left_out, targets, "default targets")
+                print(f"wheelgap: note: {note}", file=sys.stderr)
+            advisory = frozenset(t for t in advisory if t in targets)
+        elif advisory:
+            # An advisory target never fails the run, so one the lock leaves out isn't checked either: with a note,
+            # as for the defaults, rather than an error.
+            unlocked = {t for source in sources for t in lock_environment_targets(source, advisory)[0]}
+            if unlocked and len(unlocked) < len(targets):
                 if not quiet:
                     print(
-                        f"wheelgap: note: {', '.join(s.label for s in sources if s.supported_markers)} is locked "
-                        f"for `[tool.uv] environments` only, which leave out {', '.join(left_out)}: checking the "
-                        f"default targets it covers ({', '.join(p for p in DEFAULT_PLATFORMS if p in locked)})",
+                        f"wheelgap: note: {', '.join(s.label for s in sources if s.supported_markers)} is locked for "
+                        "`[tool.uv] environments` only, which leave out the advisory targets "
+                        f"{', '.join(t.label(len({t.python for t in targets}) > 1) for t in targets if t in unlocked)}"
+                        ": not checking them",
                         file=sys.stderr,
                     )
-                targets = [t for t in targets if t.platform in locked]
-                advisory = frozenset(t for t in advisory if t.platform in locked)
+                targets = [t for t in targets if t not in unlocked]
+                advisory = advisory - unlocked
         for source in sources:
             check_report_targets(source, targets)
             check_lock_environments(source, targets)

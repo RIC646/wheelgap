@@ -564,6 +564,8 @@ def test_check_lockfile_refuses_targets_outside_the_lock_environments(fake_pypi,
     linux = wheelgap.make_targets(python="3.13", platforms="linux-x86_64")
     (result,) = wheelgap.check_lockfile(fixtures / "uvenvironments", linux)
     assert (result.name, result.statuses) == ("markupsafe", {linux[0]: Status.WHEEL})
+    (result,) = wheelgap.check_lockfile(fixtures / "uvenvironments")  # no targets: the default ones it covers
+    assert {t.platform for t in result.statuses} == {"linux-x86_64"}
     for platforms in ("win-amd64", ["linux-x86_64", "linux-aarch64"], None):  # None: the default platforms
         targets = wheelgap.make_targets(python="3.13", platforms=platforms)
         with pytest.raises(SourceError, match="uv.lock: this lock doesn't cover .*`uv sync` fails there"):

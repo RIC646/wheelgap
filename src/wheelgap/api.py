@@ -25,7 +25,17 @@ from typing import ClassVar, Literal, overload
 from packaging.utils import canonicalize_name
 
 from . import origin, pypi
-from .check import Row, Status, check, check_lock_environments, explain, explain_lines, status_for, wheel_tags
+from .check import (
+    Row,
+    Status,
+    check,
+    check_lock_environments,
+    explain,
+    explain_lines,
+    narrow_to_lock_environments,
+    status_for,
+    wheel_tags,
+)
 from .deps import Resolver, pinned_complete, resolve_deps
 from .offline import require_offline
 from .pyodide import PyodideLock, bundled_version_differs, bundles, check_locks
@@ -493,6 +503,7 @@ def _check_lockfile(
     no_dev: bool = False,
 ) -> tuple[list[Result], Source, list[Row]]:
     """check_lockfile(), also returning the source and check rows for diff's skips and suggestions."""
+    default_targets = targets is None
     targets = _package_targets(targets)
     pyodide_locks = tuple(pyodide_locks)
     if online and offline:
@@ -599,6 +610,8 @@ def _check_lockfile(
             resolve_deps(source, targets, resolver)
     else:
         check_report_targets(source, targets)
+        if default_targets:  # as on the command line: the default platforms the lock covers
+            targets = narrow_to_lock_environments([source], targets)[0]
         check_lock_environments(source, targets)
         if offline:
             require_offline([source], "offline=True", undo="set offline=False")

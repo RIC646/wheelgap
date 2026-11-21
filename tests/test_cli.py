@@ -1482,6 +1482,29 @@ def test_lock_environments_narrow_the_default_targets(capsys, fake_pypi, tmp_pat
     assert code == 2 and "it covers none of the targets asked for" in err and "note:" not in err
 
 
+def test_lock_environments_narrow_the_default_targets_in_diff(capsys, fake_pypi, tmp_path):
+    old, new = tmp_path / "old" / "uv.lock", tmp_path / "new" / "uv.lock"
+    for lock in (old, new):
+        lock.parent.mkdir()
+        lock.write_text(environments_lock("sys_platform == 'linux'"), encoding="utf-8")
+    code, _, err = run(capsys, "diff", str(old), str(new), "-p", "3.12")
+    assert code == 0 and "checking the default targets it covers (linux-x86_64, linux-aarch64)" in err
+    # A platform the new lock gives up is refused, not dropped.
+    old.write_text(environments_lock(), encoding="utf-8")
+    code, _, err = run(capsys, "diff", str(old), str(new), "-p", "3.12")
+    assert code == 2 and "this lock doesn't cover macos-arm64, win-amd64" in err
+
+
+def test_lock_environments_leave_out_advisory_targets(capsys, fake_pypi, tmp_path):
+    (tmp_path / "uv.lock").write_text(environments_lock(*LINUX_ONLY), encoding="utf-8")
+    args = ("-p", "3.12", "-t", "linux-x86_64,win-amd64", "--advisory", "win-amd64", "--json")
+    code, out, err = run(capsys, str(tmp_path), *args)
+    assert code == 0 and [t["platform"] for t in json.loads(out)["targets"]] == ["linux-x86_64"]
+    assert "which leave out the advisory targets win-amd64: not checking them" in err
+    # Asked for and required, it's still an error.
+    assert run(capsys, str(tmp_path), "-p", "3.12", "-t", "linux-x86_64,win-amd64")[0] == 2
+
+
 def test_lock_environments_narrowing_keeps_advisory_targets(capsys, fake_pypi, tmp_path):
     (tmp_path / "uv.lock").write_text(environments_lock("sys_platform == 'linux'"), encoding="utf-8")
     code, out, _ = run(capsys, str(tmp_path), "-p", "3.12", "--json", "--advisory", "linux-aarch64,win-amd64")

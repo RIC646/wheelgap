@@ -309,6 +309,15 @@ and to every requirement, including those in `-r` and `-c` files: with `--no-bin
 (`source` if it has an sdist), and with `--only-binary` a package with no fitting wheel is `missing`, since pip won't
 build it. `--explain` says which option did it.
 
+The same two options written after a requirement (`albumentations>=0.3.2 --no-binary qudida,albumentations`, after
+0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line
+of its own, not only for that requirement. `--hash` and `--config-settings` after a requirement are accepted as
+before. Any other option there is an input error that names the file and line: pip itself ignores some (`--pre`,
+`--index-url`, `-r`) and refuses the rest, so put the option on its own line.
+
+An included file that can't be read (`-r FILE` or `-c FILE` naming a file that isn't there) is an input error that
+names the including file and line, `requirements.txt:3: -r base.txt: file not found`; pip stops there too.
+
 **Constraint files** (`-c FILE`, `-cFILE`, `--constraint FILE` or `--constraint=FILE`) restrict unpinned requirements
 without adding packages. Exact constraints select a version; ranges are intersected. A constraint wheelgap can't apply
 leaves the package `unknown` rather than guessed: one with an environment marker, a URL or path, or two different

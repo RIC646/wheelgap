@@ -2007,26 +2007,34 @@ class _FormatControl:
         return (False, False)
 
 
-def _join_continued_lines(text: str) -> list[str]:
-    """Joins backslash-continued non-comment lines without inserting spaces, matching pip's join_lines."""
-    joined: list[str] = []
+def _numbered_lines(text: str) -> list[tuple[int, str]]:
+    """Joins backslash-continued non-comment lines without inserting spaces, matching pip's join_lines. Each comes
+    with the number of the line it starts on, which is the one pip names in its errors."""
+    joined: list[tuple[int, str]] = []
     pending: list[str] = []
-    for line in text.splitlines():
+    start = 0
+    for number, line in enumerate(text.splitlines(), 1):
         is_comment = _FULL_LINE_COMMENT_RE.match(line) is not None
+        if not pending:
+            start = number
         if not line.endswith("\\") or is_comment:
             if is_comment:
                 line = " " + line
             if pending:
                 pending.append(line)
-                joined.append("".join(pending))
+                joined.append((start, "".join(pending)))
                 pending.clear()
             else:
-                joined.append(line)
+                joined.append((start, line))
         else:
             pending.append(line.strip("\\"))
     if pending:
-        joined.append("".join(pending))
+        joined.append((start, "".join(pending)))
     return joined
+
+
+def _join_continued_lines(text: str) -> list[str]:
+    return [line for _, line in _numbered_lines(text)]
 
 
 def _format_option(token: str) -> tuple[str, str | None] | None:
@@ -2193,23 +2201,68 @@ def _finalize_requirements(
     )
 
 
+def _shown(p: Path, stack: list[Path]) -> str:
+    # Names are relative to the folder the run started in, so two files with the same name in different
+    # folders stay distinguishable (a file outside that folder is ../name). Forward slashes on every
+    # platform, as the include lines themselves are written.
+    try:
+        return Path(os.path.relpath(p, stack[0].parent)).as_posix()
+    except ValueError:  # on another Windows drive: no relative path exists
+        return p.name
+
+
 def _cycle_error(path: Path, line: str, target_path: Path, stack: list[Path]) -> SourceError:
-    # Names in the chain are relative to the folder the run started in, so two files with the same
-    # name in different folders stay distinguishable (a file outside that folder is ../name). Forward slashes
-    # on every platform, as the include lines themselves are written. The chain names files as they were
-    # written, so a cycle through a link names the link, as pip names it.
-    base = stack[0].parent
-
-    def show(p: Path) -> str:
-        try:
-            return Path(os.path.relpath(p, base)).as_posix()
-        except ValueError:  # on another Windows drive: no relative path exists
-            return p.name
-
+    # The chain names files as they were written, so a cycle through a link names the link, as pip names it.
     return SourceError(
-        f"{show(path)}: {line} includes a file that is already being read "
-        f"({' -> '.join(show(p) for p in (*stack, target_path))}); pip refuses this"
+        f"{_shown(path, stack)}: {line} includes a file that is already being read "
+        f"({' -> '.join(_shown(p, stack) for p in (*stack, target_path))}); pip refuses this"
     )
+
+
+def _include_error(path: Path, number: int | None, line: str, error: OSError, stack: list[Path]) -> SourceError:
+    """An included file that can't be read, named by the line that includes it (pip stops here too: "Could not
+    open requirements file")."""
+    where = _shown(path, stack) + (f":{number}" if number is not None else "")
+    why = "file not found" if isinstance(error, FileNotFoundError) else (error.strerror or str(error)).lower()
+    return SourceError(f"{where}: {line}: {why}")
+
+
+# The options pip takes after a requirement that wheelgap reads there. pip 26.3 parses the rest of the line with
+# the parser it uses for option lines (break_args_options and build_parser in pip/_internal/req/req_file.py), but
+# hands a requirement only --hash and --config-settings; --no-binary and --only-binary still take effect, for the
+# whole install, because their parser callbacks change the install's format control as the line is parsed.
+_CONFIG_SETTINGS_OPTIONS = ("--config-settings", "--config-setting")
+
+
+def _requirement_options(text: str, where: str) -> tuple[bool, bool]:
+    """Checks the options after a requirement (`name>=1 --no-binary name`). Returns whether there's a --hash, and
+    whether there's a --no-binary or --only-binary for _apply_format_options. SourceError for any other option:
+    pip takes some (and ignores them: --pre, --index-url, -r) and refuses the rest, and wheelgap reads neither."""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        raise SourceError(f"{where}: pip can't split this line (an unclosed quote?): {text}") from None
+    hashed = formats = False
+    k = 0
+    while k < len(tokens):
+        token = tokens[k]
+        option, eq, _ = token.partition("=")
+        if token.startswith("-C") and not token.startswith("--"):
+            attached = len(token) > 2
+        elif option == "--hash" or option in _CONFIG_SETTINGS_OPTIONS or _format_option(token):
+            attached = bool(eq)
+        else:
+            raise SourceError(
+                f"{where}: wheelgap doesn't read {token} after a requirement, only --hash, --no-binary, "
+                "--only-binary and --config-settings (pip ignores some other options there and refuses the "
+                "rest); put it on a line of its own"
+            )
+        if not attached and k + 1 >= len(tokens):
+            raise SourceError(f"{where}: {token} needs a value, as in pip")
+        hashed = hashed or option == "--hash"
+        formats = formats or _format_option(token) is not None
+        k += 1 if attached else 2
+    return hashed, formats
 
 
 def _read_requirements(
@@ -2249,8 +2302,12 @@ def _read_requirements(
     try:
         append = constraints.append if constraint else pkgs.append
         # utf-8-sig: a byte order mark (Windows editors) mustn't hide an option on the first line.
-        lines = raw_lines if raw_lines is not None else _join_continued_lines(path.read_text(encoding="utf-8-sig"))
-        for raw in lines:
+        numbered: list[tuple[int | None, str]] = (
+            [(None, raw) for raw in raw_lines]
+            if raw_lines is not None
+            else list(_numbered_lines(path.read_text(encoding="utf-8-sig")))
+        )
+        for number, raw in numbered:
             if compiler_signs is not None and not constraint and _VIA_COMMENT_RE.match(raw.lstrip()):
                 compiler_signs.append("via")  # pip-compile writes "# via <name>" comment lines
             line = _COMMENT_RE.split(raw, 1)[0].strip()  # " # note" or "<TAB># note"
@@ -2294,8 +2351,8 @@ def _read_requirements(
                     # A -r inside the constraints file is requirements, not more constraints (pip's rule),
                     # so what it returns is packages, not constraints: keep them. req_lines and compiler_signs
                     # are passed through for that -r file only: the constraints file's own lines add to neither.
-                    pkgs.extend(
-                        _read_requirements(
+                    try:
+                        included = _read_requirements(
                             path.parent / target,
                             seen,
                             constraints,
@@ -2306,7 +2363,9 @@ def _read_requirements(
                             compiler_signs,
                             stack=stack,
                         )
-                    )
+                    except OSError as e:  # the constraints file itself: one it includes is a SourceError by now
+                        raise _include_error(path, number, line, e, stack) from e
+                    pkgs.extend(included)
                 elif not already_seen and index_options is not None:
                     index_options.append(line)
                 continue
@@ -2314,8 +2373,8 @@ def _read_requirements(
                 target_path = Path(os.path.abspath(path.parent / include[1]))
                 if target_path in stack:
                     raise _cycle_error(path, line, target_path, stack)
-                pkgs.extend(
-                    _read_requirements(
+                try:
+                    included = _read_requirements(
                         path.parent / include[1],
                         seen,
                         constraints,
@@ -2326,7 +2385,9 @@ def _read_requirements(
                         compiler_signs,
                         stack,
                     )
-                )
+                except OSError as e:  # the included file itself: one it includes is a SourceError by now
+                    raise _include_error(path, number, line, e, stack) from e
+                pkgs.extend(included)
                 continue
             if line.startswith("-e ") or line.startswith("--editable"):
                 if not already_seen:
@@ -2339,18 +2400,20 @@ def _read_requirements(
                 continue  # pip options: --index-url, --no-binary, --hash continuation, ...
             if already_seen:
                 continue
-            tokens = line.split()
-            # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.
-            if (
-                compiler_signs is not None
-                and not constraint
-                and any(t == "--hash" or t.startswith("--hash=") for t in tokens)
-            ):
-                compiler_signs.append("hash")
-            # Drop --hash=sha256:... and "--hash sha256:..." (option and value as two tokens).
-            line = " ".join(
-                t for k, t in enumerate(tokens) if not t.startswith("--hash") and (k == 0 or tokens[k - 1] != "--hash")
-            )
+            # The requirement ends where pip ends it: before the first space-separated word that starts with "-"
+            # (break_args_options). The rest is options: --hash=sha256:..., "--hash sha256:...", --no-binary NAMES.
+            words = line.split()  # any whitespace, as before: pip splits at single spaces only
+            first_option = next((k for k, word in enumerate(words) if word.startswith("-")), len(words))
+            if first_option < len(words):
+                where = _shown(path, stack) + (f":{number}" if number is not None else "")
+                options = " ".join(words[first_option:])
+                hashed, formats = _requirement_options(options, where)
+                # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.
+                if hashed and compiler_signs is not None and not constraint:
+                    compiler_signs.append("hash")
+                if formats and format_control is not None:
+                    _apply_format_options(options, format_control)
+            line = " ".join(words[:first_option])
             if line.startswith((".", "/")):
                 append(Package(line, None, skip="path", origin=path.name))
                 continue

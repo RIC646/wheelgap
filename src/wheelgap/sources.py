@@ -6,7 +6,9 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import tomllib
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -148,6 +150,20 @@ class UvSelection:
 
 
 @dataclass
+class DirectoryInput:
+    """How a directory input (`wheelgap DIR`) came to the file that was read (load_directory)."""
+
+    directory: Path
+    path: Path
+    # Where the file was found: "lockfile" (one of LOCKFILES at the root, as always), "pyproject" (the root's
+    # pyproject.toml), "requirements" (the root's only requirements file under another name) or "subfolder" (the
+    # only input below the root).
+    reason: str
+    # Files that come first in the search but have nothing to check, each with why.
+    empty: list[tuple[Path, str]] = field(default_factory=list)
+
+
+@dataclass
 class Source:
     label: str
     packages: list[Package] = field(default_factory=list)
@@ -218,6 +234,8 @@ class Source:
     pypi_only: bool = False
     # A project directory with pixi.lock as well as the lockfile that was picked: the pixi.lock, for a note.
     passed_over: Path | None = None
+    # The input was a directory: which of its files this is and why (None for a file or package names).
+    found: DirectoryInput | None = None
     # A pip installation report captures one generating environment, not a cross-platform dependency graph.
     pip_report_env: dict[str, str] | None = None
     # Requirements for --deps to resolve: package names on the command line, selected pyproject.toml
@@ -3099,6 +3117,258 @@ def find_lockfile(directory: Path, pixi: bool = False) -> Path:
     raise SourceError(f"no lockfile found in {directory} (looked for {', '.join(LOCKFILES)}). {hint}")
 
 
+class DirectoryChoiceError(SourceError):
+    """A directory with no input at its root that directory mode reads on its own, and more than one file to choose
+    from (or one it won't pick by itself). `candidates` are those files, for --json."""
+
+    def __init__(self, message: str, candidates: list[Path]) -> None:
+        super().__init__(message)
+        self.candidates = candidates
+
+
+# How far below a directory its inputs are looked for when the root has none (backend/requirements.txt is 1 deep),
+# and how many folders that search opens before it gives up, so a huge tree stays fast.
+NESTED_DEPTH = 3
+NESTED_FOLDERS = 2000
+# Candidates a "pick one" error lists before it counts the rest.
+CANDIDATES_LISTED = 10
+# Never searched: installed packages, not a project's inputs. Hidden folders and virtualenvs (a pyvenv.cfg) are
+# left out as well.
+_NEVER_SEARCHED = frozenset({"node_modules", "site-packages", "__pycache__"})
+# Words in a folder's or a requirements file's name (tests/, e2e_tests/, docs/, requirements-dev.txt) that say its
+# packages are for the tests, the docs, an example or development, not the project itself. Such an input is offered
+# when there is nothing else, and never checked on its own.
+_SIDE_WORDS = frozenset(
+    {"test", "tests", "testing", "example", "examples", "sample", "samples", "demo", "demos", "doc", "docs"}
+    | {"bench", "benchmark", "benchmarks", "fixtures", "templates"}
+    | {"dev", "develop", "development", "lint", "ci", "typing"}
+)
+
+
+def _is_side(name: str) -> bool:
+    return not _SIDE_WORDS.isdisjoint(re.split(r"[^a-z0-9]+", name.lower()))
+
+
+def _nothing_to_check(source: Source) -> str | None:
+    """Why a file gives a run nothing to check, or None when it lists a package from an index."""
+    if any(not p.skip for p in source.packages):
+        return None
+    reasons = sorted({p.skip for p in source.packages if p.skip})
+    what = f"only skipped entries ({', '.join(reasons)})" if reasons else "no packages"
+    if source.kind == "pixi":
+        return f"{what} in its default environment"
+    return what
+
+
+def _command(path: Path) -> str:
+    """`wheelgap PATH` as it can be pasted into a shell."""
+    quoted = subprocess.list2cmdline([str(path)]) if os.name == "nt" else shlex.quote(str(path))
+    return f"wheelgap {quoted}"
+
+
+def _other_requirements(directory: Path) -> list[Path]:
+    """Requirements files directory mode doesn't read by name: requirements*.txt and requirements*.in at the root,
+    and *.txt and *.in in requirements/ (not constraints*). A .in beside its compiled .txt is left out."""
+    found: list[Path] = []
+    for folder, prefix in ((directory, "requirements"), (directory / "requirements", "")):
+        try:
+            names = sorted(entry.name for entry in os.scandir(folder) if entry.is_file())
+        except OSError:
+            continue
+        for name in names:
+            stem, dot, suffix = name.rpartition(".")
+            if not dot or suffix not in ("txt", "in") or not name.startswith(prefix):
+                continue
+            if not prefix and stem.lower().startswith("constraint"):
+                continue
+            if suffix == "in" and f"{stem}.txt" in names:
+                continue
+            found.append(folder / name)
+    return found
+
+
+def _unread_project(directory: Path) -> str | None:
+    """The file at the root that holds the project's own dependencies where wheelgap doesn't read them (setup.py,
+    setup.cfg, or a pyproject.toml load_file refused or took no project from), or None. With one, an input in a
+    subfolder isn't taken for the project's: it is more likely a tool's or a service's beside it."""
+    for name in ("setup.py", "setup.cfg"):
+        if (directory / name).is_file():
+            return name
+    try:
+        data = tomllib.loads((directory / "pyproject.toml").read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    except ValueError:
+        return "pyproject.toml"
+    if "project" in data or _builds_a_package(data, directory / "pyproject.toml") or _has_poetry_dependencies(data):
+        return "pyproject.toml"
+    return None
+
+
+def _folder_input(folder: Path, names: set[str]) -> Path | None:
+    """The file `wheelgap FOLDER` would read from a subfolder: its first lockfile in LOCKFILES order, else a
+    pyproject.toml that lists [project] dependencies."""
+    for name in LOCKFILES:
+        if name in names:
+            return folder / name
+    if "pyproject.toml" in names:
+        try:
+            source = load_file(folder / "pyproject.toml")
+        except Exception:  # unreadable or malformed: `wheelgap FOLDER` would have no answer either
+            return None
+        if not source.pyproject_groups_only and _nothing_to_check(source) is None:
+            return folder / "pyproject.toml"
+    return None
+
+
+def _nested_inputs(directory: Path) -> tuple[list[Path], list[Path], bool]:
+    """Inputs up to NESTED_DEPTH folders below DIRECTORY, one per folder: (the project's, those under a folder
+    _is_side names, whether the whole tree was searched). Breadth first and sorted, so the answer doesn't depend on the
+    file system's order. Symlinks aren't followed, and hidden folders, virtualenvs and installed packages are left
+    out."""
+    main: list[Path] = []
+    side: list[Path] = []
+    opened = 0
+    queue: deque[tuple[Path, int, bool]] = deque([(directory, 0, False)])
+    while queue:
+        folder, depth, is_side = queue.popleft()
+        if opened == NESTED_FOLDERS:
+            return main, side, False
+        opened += 1
+        try:
+            entries = sorted(os.scandir(folder), key=lambda entry: entry.name)
+            files = {entry.name for entry in entries if entry.is_file(follow_symlinks=False)}
+            folders = [entry.name for entry in entries if entry.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue  # unreadable: nothing to offer from it
+        if depth:
+            if "pyvenv.cfg" in files:
+                continue  # a virtualenv
+            if (found := _folder_input(folder, files)) is not None:
+                (side if is_side else main).append(found)
+        if depth < NESTED_DEPTH:
+            for name in folders:
+                if not name.startswith(".") and name not in _NEVER_SEARCHED:
+                    queue.append((folder / name, depth + 1, is_side or _is_side(name)))
+    return main, side, True
+
+
+def _choice_error(directory: Path, what: str, candidates: list[Path]) -> DirectoryChoiceError:
+    lines = [f"  {_command(path)}" for path in candidates[:CANDIDATES_LISTED]]
+    if len(candidates) > CANDIDATES_LISTED:
+        lines.append(f"  (and {len(candidates) - CANDIDATES_LISTED} more)")
+    return DirectoryChoiceError(
+        f"no lockfile, requirements.txt or pyproject.toml dependencies at the root of {directory}{what}:\n"
+        + "\n".join(lines),
+        candidates,
+    )
+
+
+def load_directory(directory: Path, environment: str | None = None) -> Source:
+    """Read a directory input. Its first lockfile in LOCKFILES order is read, as always (pixi.lock first when an
+    environment is named). A file there with nothing to check gives way to the next one that has something, then to
+    pyproject.toml. With none of those names: the root's pyproject.toml if it lists [project] dependencies, else its
+    only requirements file under another name, else the only input in a subfolder. More than one to choose from is a
+    DirectoryChoiceError that lists them: wheelgap never picks one of several. `source.found` says what was read."""
+    pixi_lock = directory / "pixi.lock"
+    if environment is not None and pixi_lock.is_file():
+        source = load_file(pixi_lock, environment)
+        source.found = DirectoryInput(directory, pixi_lock, "lockfile")
+        return source
+    pyproject = directory / "pyproject.toml"
+    at_root = [directory / name for name in LOCKFILES if (directory / name).is_file()]
+    if at_root:
+        first = load_file(at_root[0], environment)
+        first.found = DirectoryInput(directory, at_root[0], "lockfile")
+        if at_root[0] != pixi_lock and pixi_lock.is_file():
+            first.passed_over = pixi_lock
+        why = _nothing_to_check(first)
+        if why is None:
+            return first
+        # Nothing to check in it (a requirements.txt that only says `.`, a pixi.lock of conda packages): the next
+        # file that has something is the answer, with a note. If none has, the run is the same as before.
+        empty = [(at_root[0], why)]
+        for path in [*at_root[1:], *([pyproject] if pyproject.is_file() else [])]:
+            try:
+                other = load_file(path)
+            except Exception:
+                continue  # unreadable or malformed: no better than the file that was found first
+            if other.pyproject_groups_only:
+                continue
+            why = _nothing_to_check(other)
+            if why is None:
+                other.found = DirectoryInput(directory, path, "pyproject" if path == pyproject else "lockfile", empty)
+                return other
+            empty.append((path, why))
+        return first
+
+    # A pyproject.toml with a [project] table that lists nothing is the answer only if nothing else turns up.
+    last_resort: Source | None = None
+    problem: str | None = None
+    if pyproject.is_file():
+        try:
+            source = load_file(pyproject)
+        except SourceError as e:
+            problem = str(e)
+        except Exception as e:  # malformed in a way its reader has no message for
+            problem = f"{pyproject}: {type(e).__name__}: {e}"
+        else:
+            if not source.pyproject_groups_only:
+                source.found = DirectoryInput(directory, pyproject, "pyproject")
+                if _nothing_to_check(source) is None or source.pyproject_extras:
+                    return source
+                last_resort = source
+    empty = [(pyproject, "no dependencies")] if last_resort is not None else []
+
+    others = _other_requirements(directory)
+    if len(others) > 1:
+        raise _choice_error(directory, ", and more than one requirements file to choose from. Check one", others)
+    if others and not _is_side(others[0].name.rpartition(".")[0]):
+        source = load_file(others[0])
+        source.found = DirectoryInput(directory, others[0], "requirements", empty)
+        return source
+
+    main, side, complete = _nested_inputs(directory)
+    stopped = "" if complete else f" (the search stopped after {NESTED_FOLDERS} folders)"
+    if len(main) == 1 and complete:
+        # Taken for the project's dependencies only where the root isn't a project of its own.
+        if last_resort is not None:
+            why = "Its pyproject.toml lists no dependencies"
+        elif (unread := _unread_project(directory)) is not None:
+            why = f"Its own dependencies are in {unread}, which wheelgap can't read"
+        else:
+            source = load_file(main[0])
+            source.found = DirectoryInput(directory, main[0], "subfolder")
+            return source
+        raise _choice_error(
+            directory,
+            f". {why}, so the one input in its subfolders isn't taken for the project's. To check that one",
+            main,
+        )
+    if main:
+        raise _choice_error(directory, f", but inputs in its subfolders{stopped}. Check one", main)
+    if last_resort is not None:
+        return last_resort
+    if others or side:
+        raise _choice_error(
+            directory,
+            f", and the only inputs it has are, by their names, for development, tests, docs or examples{stopped}, "
+            "which wheelgap doesn't check on its own. To check one",
+            [*others, *side],
+        )
+
+    looked = (
+        f"{', '.join(LOCKFILES)}, a pyproject.toml with [project] dependencies, requirements*.txt and "
+        f"requirements/*.txt there, and the lockfile names and pyproject.toml up to {NESTED_DEPTH} folders down"
+    )
+    hint = "Pass a file, or package names like `wheelgap numpy psycopg2`."
+    if problem is not None:
+        hint = f"Its pyproject.toml can't be checked ({problem}). {hint}"
+    elif project_hint := _pyproject_hint(pyproject):
+        hint = f"{project_hint} {hint}"
+    raise SourceError(f"no lockfile found in {directory}{stopped} (looked for {looked}). {hint}")
+
+
 # A dependency group's name as PEP 735 allows it: letters, digits, `.`, `-` and `_`, starting and ending with a
 # letter or digit.
 _GROUP_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -3178,7 +3448,7 @@ def load_inputs(
     *,
     requirements_constraints: Mapping[Path, tuple[Path, ...]] | None = None,
 ) -> list[Source]:
-    """Each input is a file, a directory (lockfile auto-detected) or a requirement like 'numpy==2.3.4'.
+    """Each input is a file, a directory (its input is found by load_directory) or a requirement like 'numpy==2.3.4'.
     `environment` picks the pixi.lock environment; with no pixi.lock input it's an error.
     `requirements_constraints` maps a requirements file among the inputs to the constraints files given beside it
     (--dockerfile-inputs: `pip install -r FILE -c CONSTRAINTS`)."""
@@ -3189,9 +3459,7 @@ def load_inputs(
     for item in inputs:
         p = Path(item)
         if p.is_dir():
-            sources.append(load_file(find_lockfile(p, environment is not None), environment))
-            if sources[-1].kind != "pixi" and (p / "pixi.lock").is_file():
-                sources[-1].passed_over = p / "pixi.lock"
+            sources.append(load_directory(p, environment))
         elif p.is_file():
             constraints = requirements_constraints.get(p, ()) if requirements_constraints is not None else ()
             sources.append(load_file(p, environment, constraints))

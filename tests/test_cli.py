@@ -2963,12 +2963,12 @@ def test_pyproject_self_reference_in_dependencies_is_not_looked_up(capsys, fake_
     assert not any("mylib" in url.lower() for url in fake_pypi)
 
 
-def test_directory_without_lockfile_suggests_pyproject(capsys, fake_pypi, tmp_path):
+def test_directory_without_lockfile_checks_pyproject(capsys, fake_pypi, tmp_path):
     (tmp_path / "pyproject.toml").write_text(LIB_PYPROJECT, encoding="utf-8")
-    code, _, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64")
-    assert code == 2
-    assert "no lockfile found" in err
-    assert f"wheelgap {tmp_path / 'pyproject.toml'}" in err
+    code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--json")
+    assert code == 1  # as `wheelgap DIR/pyproject.toml` (tests/test_directory.py has the rest)
+    assert {row["name"] for row in json.loads(out)["packages"]} == {"ranged", "fastlib"}
+    assert f"so {tmp_path / 'pyproject.toml'} was checked" in err
 
 
 def test_directory_with_groups_only_pyproject_suggests_group(capsys, fake_pypi, tmp_path):

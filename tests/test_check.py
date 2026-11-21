@@ -1,4 +1,4 @@
-from wheelgap.check import Status, check, marker_holds, status_for
+from wheelgap.check import ConflictWorld, Status, check, marker_holds, status_for
 from wheelgap.pypi import fill_all
 from wheelgap.sources import Package, Source, load_inputs
 from wheelgap.targets import build_targets
@@ -271,6 +271,27 @@ def test_markers_wheelgap_cannot_know_count_as_needed():
     for marker in ("extra == 'extra-7-proj-cu124'", "platform_release >= '20.0'", "'docs' in dependency_groups"):
         assert marker_holds(marker, t), marker
     assert not marker_holds("sys_platform == 'win32'", t)
+
+
+def test_uv_conflict_items_decide_markers_given_which_are_on():
+    lin, mac = build_targets(["3.13"], ["linux-x86_64", "macos-arm64"])
+    unsloth, vllm = "extra-9-agentbook-unsloth", "extra-9-agentbook-vllm"
+    known = frozenset({unsloth, vllm})
+    # bojieli/ai-agent-book's browser-use -> pyobjc edge: lowercase 'darwin' never matches platform_system, and the
+    # other clause needs both sides of the unsloth/vllm conflict, so no install of the lock has pyobjc.
+    pyobjc = f"platform_system == 'darwin' or (extra == '{unsloth}' and extra == '{vllm}')"
+    for on in (frozenset(), frozenset({unsloth}), frozenset({vllm})):
+        world = ConflictWorld(on, known)
+        assert not marker_holds(pyobjc, lin, extras=frozenset(), conflicts=world)
+        assert not marker_holds(pyobjc, mac, extras=frozenset(), conflicts=world)
+    assert marker_holds(pyobjc, mac, extras=frozenset())  # without the conflicts: unknown, so counted
+    torch = f"sys_platform != 'darwin' and extra != '{unsloth}'"
+    assert marker_holds(torch, lin, extras=frozenset(), conflicts=ConflictWorld(frozenset({vllm}), known))
+    assert not marker_holds(torch, lin, extras=frozenset(), conflicts=ConflictWorld(frozenset({unsloth}), known))
+    # A name that isn't one of the lock's conflict items stays unknown.
+    assert marker_holds(
+        "extra == 'extra-3-foo-x1'", mac, extras=frozenset(), conflicts=ConflictWorld(frozenset(), known)
+    )
 
 
 def test_platform_machine_is_unknown_on_32bit_x86():

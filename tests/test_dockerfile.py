@@ -526,7 +526,7 @@ def test_unknown_stage_is_a_clear_error(tmp_path):
 
 def test_scratch_after_stages_keeps_the_usual_error(tmp_path):
     text = "FROM python:3.13-alpine AS build\nRUN pip wheel . -w /w\nFROM scratch\nCOPY --from=build /w /w\n"
-    with pytest.raises(DockerfileError, match="scratch: only the official python images"):
+    with pytest.raises(DockerfileError, match="FROM scratch: the image starts empty"):
         read_dockerfile(_dockerfile(tmp_path, text))
 
 
@@ -2708,6 +2708,9 @@ def test_cli_dockerfile_inputs_names_an_unread_image_before_an_unread_run(tmp_pa
         ("FROM Ubuntu:24.04\n", "repository name must be lowercase"),
         ("FROM ubuntu:24.04 AS\n", "expected 'IMAGE' or 'IMAGE AS NAME'"),
         ("FROM --flag ubuntu\n", "unknown flag"),
+        # An empty image has no Python but one a COPY brings.
+        ("FROM scratch\n", ":1: FROM scratch: the image starts empty"),
+        ("FROM python:3.13 AS base\nFROM scratch\nCOPY --from=base /usr/local /usr/local\n", "FROM scratch"),
     ],
 )
 def test_cli_dockerfile_inputs_p_and_t_dont_stand_in_for_these(tmp_path, capsys, fake_pypi, dockerfile, error):
@@ -2726,3 +2729,55 @@ def test_unknown_image_error_is_a_dockerfile_error_with_the_from_line(tmp_path):
         read_dockerfile(path)
     assert isinstance(excinfo.value, UnknownImageError)
     assert excinfo.value.line == 2
+
+
+def test_cli_dockerfile_unread_image_note_names_what_the_image_may_change(tmp_path, capsys, fake_pypi):
+    # python:3-onbuild runs its own `pip install -r requirements.txt` in this build, and an image may set PIP_ values.
+    path = _context(
+        tmp_path, "FROM python:3-onbuild\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n"
+    )
+    (tmp_path / "requirements.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    argv = ["--dockerfile", str(path), "--dockerfile-inputs", "-p", "3.13", "-t", "linux-x86_64", "--json"]
+    assert main(argv) == 0
+    [note] = json.loads(capsys.readouterr().out)["dockerfile_notes"]
+    for unknown in ("which pip version it has", "its own pip settings (ENV PIP_..., a pip.conf, a constraints file)"):
+        assert unknown in note["message"]
+    assert "ONBUILD instructions it runs in this build" in note["message"]
+
+
+@pytest.mark.parametrize(
+    ("image", "targets", "noted"),
+    [
+        ("python:3-alpine", "linux-x86_64,musl-x86_64", True),
+        ("node:22-alpine3.20", "linux-aarch64", True),
+        ("example/musl-python", "linux-x86_64", True),
+        ("python:3-alpine", "musl-x86_64", False),  # musl was asked for
+        ("ubuntu:24.04", "linux-x86_64", False),
+    ],
+)
+def test_cli_dockerfile_alpine_tag_with_glibc_targets_gets_a_note(tmp_path, capsys, fake_pypi, image, targets, noted):
+    path = _context(tmp_path, f"FROM {image}\n")
+    assert main(["purewheel", "--dockerfile", str(path), "-p", "3.13", "-t", targets, "--json", "--quiet"]) == 0
+    captured = capsys.readouterr()
+    kinds = [note["kind"] for note in json.loads(captured.out)["dockerfile_notes"]]
+    assert kinds == (["image-not-read", "image-libc"] if noted else ["image-not-read"])
+    assert ("looks like an Alpine (musl) image, and glibc targets are checked" in captured.err) == noted
+
+
+def test_cli_dockerfile_unread_image_note_in_markdown_annotations_and_sarif(tmp_path, capsys, fake_pypi, monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    path = _context(tmp_path, "FROM ubuntu:24.04\n")
+    sarif = tmp_path / "out.sarif"
+    argv = ["purewheel", "--dockerfile", str(path), "-p", "3.13", "-t", "linux-x86_64"]
+    assert main([*argv, "--markdown", "--github-annotations", "--sarif", str(sarif)]) == 0
+    captured = capsys.readouterr()
+    assert "> **Note:** " in captured.out and "the final image isn't read (ubuntu:24.04" in captured.out
+    assert "::notice file=Dockerfile,line=1,title=wheelgap::the final image isn't read (ubuntu:24.04" in captured.err
+    [result] = json.loads(sarif.read_text(encoding="utf-8"))["runs"][0]["results"]
+    assert (result["ruleId"], result["level"]) == ("wheelgap/dockerfile-note", "note")
+    assert result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "Dockerfile"
+    assert result["locations"][0]["physicalLocation"]["region"] == {"startLine": 1}
+    # Without a note, the SARIF rules stay as they were.
+    assert main(["purewheel", "-p", "3.13", "-t", "linux-x86_64", "--sarif", str(sarif)]) == 0
+    rules = json.loads(sarif.read_text(encoding="utf-8"))["runs"][0]["tool"]["driver"]["rules"]
+    assert [rule["id"] for rule in rules] == ["wheelgap/source", "wheelgap/missing"]

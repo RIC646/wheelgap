@@ -50,7 +50,7 @@
                     },
                     "kind": {
                         "type": "string",
-                        "description": "What was left out. image-not-read: -p and -t stood in for the image."
+                        "description": "What was left out. image-not-read: -p and -t stood in for the image. image-libc: that image's tag says Alpine or musl, and glibc targets were checked."
                     },
                     "message": {"type": "string", "description": "The note as printed on stderr."}
                 }

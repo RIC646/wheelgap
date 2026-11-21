@@ -164,6 +164,9 @@ other value. A value that only mentions `PIP_` no longer counts.
 What stays unknown, and is said in the notes: the pip version the install lines run (a `pip install --upgrade pip`
 line is passed over; wheelgap answers for a current pip), and pip, setuptools and wheel themselves, which aren't
 checked.
+Every requirement is checked as a fresh install. pip keeps a package the image already has when it satisfies the
+requirement, so when a system package command installs Python packages (`apk add py3-yaml`,
+`apt-get install python3-numpy`), a note names them: the build may not fetch every package the answer checks.
 
 Requirements named on the install line (**after 0.13.0**; 0.13.0 refuses them): `RUN pip install numpy==2.3.4`,
 `pip install "numpy<3" pandas`, `pip install uvicorn[standard]`, alone or beside `-r FILE`. They are checked the way

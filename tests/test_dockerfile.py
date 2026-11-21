@@ -3331,6 +3331,14 @@ def test_dockerfile_requirements_reads_names_beside_files_and_under_uv(tmp_path)
     ]
 
 
+def test_dockerfile_requirements_gathers_the_names_of_one_run_line(tmp_path):
+    body = (
+        "RUN pip install six && pip install purewheel==3.1 && uv pip install --system fastlib==2.0.0 && pip install six"
+    )
+    _, report = _named(tmp_path, f"COPY --from=ghcr.io/astral-sh/uv:0.9.1 /uv /bin/\n{body}\n")
+    assert report.named == [(5, ["six", "purewheel==3.1"], False), (5, ["fastlib==2.0.0"], True), (5, ["six"], False)]
+
+
 def test_dockerfile_requirements_reads_a_name_from_an_arg_default_and_says_so(tmp_path):
     body = "ARG TORCH=2.1.0\nENV NAME=torch\nRUN pip install ${NAME}==$TORCH six==${SIX:-1}\n"
     with pytest.raises(DockerfileError, match=":6: .*six==\\$\\{SIX:-1\\} isn't a value"):
@@ -3624,3 +3632,31 @@ def test_cli_dockerfile_inputs_reads_a_multi_stage_dockerfile(tmp_path, capsys, 
         f"! {path} lines 9, 11 run commands wheelgap can't see into, or copy files from another stage or image: "
         "any Python packages they bring are not in this answer."
     )
+
+
+def test_cli_dockerfile_inputs_says_when_the_system_package_manager_installs_python_packages(
+    tmp_path, capsys, fake_pypi
+):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13-alpine\nRUN apk add --no-cache git py3-yaml py3-gevent py3-pip python3-dev\n"
+        "RUN apt-get install -y python3 python3.12-venv python3-numpy python-is-python3 && apk add py3-yaml\n"
+        "WORKDIR /app\nCOPY requirements.txt .\n" + _INSTALL,
+    )
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    captured = capsys.readouterr()
+    [note] = [n for n in json.loads(captured.out)["dockerfile_notes"] if n["kind"] == "system-python-packages"]
+    assert note["lines"] == [2, 3]
+    assert (
+        "lines 2, 3 install Python packages with the system package manager (py3-yaml, py3-gevent, python3-numpy)"
+        in (note["message"])
+    )
+    assert "pip keeps one of those when it satisfies a requirement" in captured.err
+    # None of these is one: the interpreter's own pieces, and the installer.
+    path.write_text(
+        "FROM python:3.13\nRUN apt-get install -y python3 python3-pip python3-dev python3.12-venv python3-setuptools\n"
+        "WORKDIR /app\nCOPY requirements.txt .\n" + _INSTALL,
+        encoding="utf-8",
+    )
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    assert "system-python-packages" not in capsys.readouterr().out

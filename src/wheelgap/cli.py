@@ -1170,6 +1170,21 @@ def dockerfile_report_notes(
                 "lines": sorted(lines),
             }
         )
+    if report.system_python:
+        lines = sorted({line for line, _ in report.system_python})
+        names = list(dict.fromkeys(name for _, name in report.system_python))
+        listed = ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
+        notes.append(
+            {
+                "dockerfile": dockerfile,
+                "line": None,
+                "kind": "system-python-packages",
+                "message": f"{_line_list(lines)} install{'s' if len(lines) == 1 else ''} Python packages with the "
+                f"system package manager ({listed}): pip keeps one of those when it satisfies a requirement, and "
+                "wheelgap checks every requirement as a fresh install, so it may report a gap the build doesn't have",
+                "lines": lines,
+            }
+        )
     for line, kind, message in report.notes:
         notes.append({"dockerfile": dockerfile, "line": line, "kind": kind, "message": message})
     warnings: list[dict[str, object]] = [
@@ -2017,7 +2032,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     inputs_report = InputsReport()
     dockerfile_warnings: list[dict[str, object]] = []
     unseen_line = ""  # the stdout line for commands that may install packages wheelgap can't see
-    uv_named: set[str] = set()  # the labels of the sources `uv pip install NAME` lines give
+    uv_named: set[int] = set()  # the id()s of the sources `uv pip install NAME` lines give
 
     def read_image() -> None:
         """The image of --dockerfile. One wheelgap can't read is an error, unless -p and -t say what to check."""
@@ -2228,7 +2243,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         named.specs.append(text)
                     sources.append(named)
                     if by_uv:
-                        uv_named.add(named.label)
+                        uv_named.add(id(named))
                     loose = unpinned_requirement_names(named)
                     if loose and not quiet:
                         noun = "package" if len(loose) == 1 else "packages"
@@ -2576,7 +2591,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     # 3.13; pip finds no matching distribution). Every requirement in such a file is pinned (dockerfile_requirements).
     uv_files = {requirements for line, requirements in installs if (line, requirements) in uv_installs}
     for source, needed in zip(sources, needed_by_source, strict=True):
-        if source.path in uv_files or source.label in uv_named:
+        if source.path in uv_files or id(source) in uv_named:
             restore_uv_python_files(needed, pythons)
     skipped = [p for p in packages if p.skip]
     rows = [r for r in check(sources, targets) if r.needed]

@@ -30,7 +30,11 @@ All eight are read-only. Package checks look packages up on PyPI, or on the inde
   `assumes` includes the platform version floors used for the check.
 - `check_lockfile`: the same answer as `wheelgap PATH --json`, `[tool.wheelgap]`
   settings included: the packages with gaps, the ones it skipped (git, path and
-  private-index packages, which aren't checked) and any notes. It also returns
+  private-index packages, which aren't checked) and any notes. A project
+  directory is searched [as on the command line](inputs.md#which-file-is-read)
+  (after 0.13.0): a note names the file that was read when it isn't the
+  directory's lockfile, and when there are several files to choose from the
+  error lists them, each a `path` to call again with. It also returns
   `blocking_newer_python` when two Pythons, one newer, are checked. With
   `dependencies: true`, requirements files, a conda `environment.yml`,
   `pyproject.toml` and a script's `# /// script` block are resolved as `--deps` would, including transitive gaps, each with `via`

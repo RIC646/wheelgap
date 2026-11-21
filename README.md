@@ -39,7 +39,7 @@ pipx run wheelgap
 
 Or install it: `pip install wheelgap`.
 
-Run either one in a project directory. It finds `uv.lock`, `pylock.toml`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`, `requirements.txt`, `requirements.lock` or `pixi.lock` on its own. [Getting started](https://wheelgap.github.io/wheelgap/getting-started/) walks through a first run.
+Run either one in a project directory. It finds `uv.lock`, `pylock.toml`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`, `requirements.txt`, `requirements.lock` or `pixi.lock` on its own. Without one of those it checks the dependencies in `pyproject.toml`, or the project's one requirements file under another name or in a subfolder, and says which file it read (after 0.13.0). [Getting started](https://wheelgap.github.io/wheelgap/getting-started/) walks through a first run.
 
 ## Usage
 

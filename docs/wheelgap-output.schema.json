@@ -10,7 +10,7 @@
         "version": {"type": "string", "description": "The wheelgap version that produced this report."},
         "sources": {
             "type": "array",
-            "description": "Labels of the inputs that were checked (lockfiles, requirements files, or package names).",
+            "description": "Labels of the inputs that were checked (lockfiles, requirements files, or package names): a file's name, or for the one input found in a directory's subfolder (after 0.13.0) its path in that directory, with / separators.",
             "items": {"type": "string"}
         },
         "dockerfile_inputs": {
@@ -30,6 +30,39 @@
                     "file": {
                         "type": "string",
                         "description": "The requirements file, relative to the build context, with / separators."
+                    }
+                }
+            }
+        },
+        "directory_inputs": {
+            "type": "array",
+            "description": "For each input that was a directory (after 0.13.0), the file wheelgap read from it and why. Absent when no input was a directory.",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["directory", "file", "reason", "empty"],
+                "properties": {
+                    "directory": {"type": "string", "description": "The directory as given."},
+                    "file": {
+                        "type": "string",
+                        "description": "The file that was read, relative to the directory, with / separators."
+                    },
+                    "reason": {
+                        "enum": ["lockfile", "pyproject", "requirements", "subfolder"],
+                        "description": "lockfile: a lockfile or requirements.txt at the root, by name. pyproject: the root's pyproject.toml. requirements: the root's only requirements file under another name. subfolder: the only input below the root."
+                    },
+                    "empty": {
+                        "type": "array",
+                        "description": "Files that come before this one in the search and were passed over because they had nothing to check.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["file", "why"],
+                            "properties": {
+                                "file": {"type": "string", "description": "Relative to the directory."},
+                                "why": {"type": "string", "description": "What the file holds instead."}
+                            }
+                        }
                     }
                 }
             }

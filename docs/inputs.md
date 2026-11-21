@@ -59,9 +59,10 @@ wheelgap only checks a file on its own when it can take it for the project's dep
 a command to run (exit 2) instead of being checked, even when there is only one:
 
 - a requirements file or a folder whose name says it is for development, tests, docs or examples: a name with
-  the word `dev`, `development`, `test(s)`, `testing`, `doc(s)`, `example(s)`, `sample(s)`, `demo(s)`,
-  `bench(mark)(s)`, `lint`, `ci`, `typing`, `fixtures` or `templates` in it, as in `requirements-dev.txt`,
-  `docs/requirements.txt` or `e2e_tests/uv.lock`. Such folders are only looked at when no other subfolder has an
+  one of these words in it, set off by `-`, `_`, `.` or the name's ends: `dev`, `develop`, `development`, `test`,
+  `tests`, `testing`, `doc`, `docs`, `example`, `examples`, `sample`, `samples`, `demo`, `demos`, `bench`,
+  `benchmark`, `benchmarks`, `lint`, `ci`, `typing`, `fixtures`, `templates`; as in `requirements-dev.txt`,
+  `docs/requirements.txt` or `e2e_tests/uv.lock` (but not `devtools/`). Such folders are only looked at when no other subfolder has an
   input;
 - the one input in a subfolder, when the root is a project itself: it has a `setup.py`, a `setup.cfg`, or a
   `pyproject.toml` with a `[project]` table, a `[build-system]` table or Poetry dependencies. The project's own

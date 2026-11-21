@@ -219,6 +219,7 @@ def test_emulated_follows_platform_machine_on_windows_x86_64_only(lock):
         ("'Darwin Kernel Version 22.' in platform_version and sys_platform == 'darwin'", LINUX, False),
         ("python_full_version >= '3.13.2'", LINUX, True),
         ("python_full_version >= '3.13'", LINUX, False),
+        ("python_full_version == '3.13.*' and sys_platform == 'darwin'", MAC, False),
         ("sys_platform == 'win32'", WIN, False),
     ],
 )
@@ -688,6 +689,26 @@ def test_uv_pip_referee(tmp_path):
     answer = script.uv_pip_referee(fake, tmp_path, LINUX, flat, tmp_path)
     assert answer["status"] == {"a==1.0": "wheel", "b==1.0": "no wheel"}
     assert calls[0][calls[0].index("--python-platform") + 1] == "x86_64-manylinux_2_36"
+
+
+def test_uv_pip_referee_names_a_pin_with_a_marker(tmp_path):
+    def fake(cmd, cwd, env):
+        if "w==1.0" in Path(cmd[3]).read_text(encoding="utf-8"):
+            return 1, (
+                "error: No solution found when resolving dependencies\n"
+                "  cause: Because w{sys_platform == 'win32'}==1.0 has no wheels with a matching Python ABI tag "
+                "(e.g., `cp313`) and you require "
+                "w{sys_platform == 'win32'}==1.0, we can conclude that your requirements are unsatisfiable.\n"
+            )
+        return 0, "a==1.0\n"
+
+    flat = script.Flat(
+        [script.Pin("a", "1.0", "", "a==1.0"), script.Pin("w", "1.0", "sys_platform == 'win32'", "w==1.0")], []
+    )
+    assert script.uv_pip_referee(fake, tmp_path, WIN, flat, tmp_path)["status"] == {
+        "a==1.0": "wheel",
+        "w==1.0": "no wheel",
+    }
 
 
 # --- wheelgap's side ----------------------------------------------------------------------------------------------

@@ -320,6 +320,14 @@ _EXTRA_ATOM = re.compile(r"""extra\s*(==|!=)\s*(['"])([^'"]+)\2""")
 _LITERAL = re.compile(r"""(['"])([^'"]*)\1""")
 
 
+def _is_version(text: str) -> bool:
+    try:
+        Version(text)
+    except InvalidVersion:
+        return False
+    return True
+
+
 def depends_on_emulation(marker: str, target: Target, variables: Sequence[tuple[str, str, tuple[str, ...]]]) -> bool:
     """Whether a lock marker's value on the target can change between uv's emulated value of one of the variables
     and a real one, for some choice of the extras it names (uv's conflict markers name extras). True when it can't
@@ -343,7 +351,7 @@ def depends_on_emulation(marker: str, target: Target, variables: Sequence[tuple[
                 if var == "python_full_version":
                     # uv's interpreter is some patch release of the target's Python: try the patch releases named.
                     minor = f"{target.major}.{target.minor}."
-                    values += tuple(v for v in literals if v.startswith(minor))
+                    values += tuple(v for v in literals if v.startswith(minor) and _is_version(v))
                 seen = parsed.evaluate(dict(env, **{var: emulated}), context="lock_file")
                 if any(parsed.evaluate(dict(env, **{var: v}), context="lock_file") != seen for v in values):
                     return True
@@ -359,6 +367,7 @@ class LockInfo:
     edges: dict[str, list[tuple[str, str]]]  # name -> [(dependency name, marker)]
     fork_markers: dict[str, list[str]]  # name -> resolution-markers of its entries
     requires_python: str = ""
+    _emulated: dict[Target, set[str]] = field(default_factory=dict, repr=False)
 
     @property
     def skipped_names(self) -> set[str]:
@@ -391,24 +400,25 @@ class LockInfo:
     def emulated(self, target: Target) -> set[str]:
         """Names whose install or version on the target may turn on a marker uv emulates (emulated_markers()):
         the dependencies of an edge whose marker depends on one, and everything below them."""
+        if target in self._emulated:
+            return self._emulated[target]
         variables = emulated_markers(target)
-        seeds = {
-            dep
-            for edges in self.edges.values()
-            for dep, marker in edges
-            if marker and depends_on_emulation(marker, target, variables)
-        }
-        seeds |= {
-            name
-            for name, markers in self.fork_markers.items()
-            if any(depends_on_emulation(m, target, variables) for m in markers)
-        }
+        checked: dict[str, bool] = {}
+
+        def depends(marker: str) -> bool:
+            if marker not in checked:
+                checked[marker] = depends_on_emulation(marker, target, variables)
+            return checked[marker]
+
+        seeds = {dep for edges in self.edges.values() for dep, marker in edges if marker and depends(marker)}
+        seeds |= {name for name, markers in self.fork_markers.items() if any(depends(m) for m in markers)}
         out, todo = set(), list(seeds)
         while todo:
             name = todo.pop()
             if name not in out:
                 out.add(name)
                 todo += [dep for dep, _ in self.edges.get(name, [])]
+        self._emulated[target] = out
         return out
 
 
@@ -864,10 +874,11 @@ def pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, cache: Pa
     return {"tool": "pip", "status": status, "not_compared": not_compared, "command": command, "runs": runs}
 
 
+# uv 0.13 names a requirement with a marker as `name{marker}==version`.
 _UV_NO_WHEEL = re.compile(
-    r"Because (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>\S+) has (?:no usable wheels|no wheels with a "
-    r"matching (?:Python ABI|Python implementation|platform) tag(?: \(e\.g\., `[^`]+`\))?) and you require "
-    r"(?P=name)==(?P=version)(?:,| and)"
+    r"Because (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?P<marker>\{[^}]*\})?==(?P<version>\S+) has (?:no usable wheels|"
+    r"no wheels with a matching (?:Python ABI|Python implementation|platform) tag(?: \(e\.g\., `[^`]+`\))?) and "
+    r"you require (?P=name)(?P=marker)?==(?P=version)(?:,| and)"
 )
 
 
@@ -1478,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
     targets = pick_targets(args.target)
     if not targets:
         parser.error(f"no target matches {args.target}")
+    args.output = args.output.resolve()  # the referees run in the input's folder: no relative paths
     args.output.mkdir(parents=True, exist_ok=True)
     check_workdir(args.output / "work")
     versions = tool_versions()

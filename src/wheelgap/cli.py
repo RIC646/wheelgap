@@ -1234,9 +1234,10 @@ def dockerfile_report_notes(
     warnings.sort(key=lambda entry: order.index(entry["line"]))  # type: ignore[arg-type]
     unseen = ""
     if order:
-        does = "run commands wheelgap can't see into" if report.warnings else ""
+        one = len(order) == 1
+        does = f"run{'s' * one} commands wheelgap can't see into" if report.warnings else ""
         if report.copied:
-            does += (", or " if does else "") + "copy files from another stage or image"
+            does += (", or " if does else "") + f"cop{'ies' if one else 'y'} files from another stage or image"
         brought = "bring" if report.copied else "install"
         unseen = f"{dockerfile} {_line_list(order)} {does}: any Python packages they {brought} are not in this answer."
     return notes, warnings, unseen

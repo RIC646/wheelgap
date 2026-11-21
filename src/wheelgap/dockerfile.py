@@ -9,6 +9,7 @@ import os
 import posixpath
 import re
 import shlex
+import sys
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -1223,7 +1224,31 @@ _PACKAGE_PATH_ROOTS = ("/", "/usr", "/usr/local", "/usr/lib", "/opt", "/root", "
 # Where the image's Python and pip, and the packages it imports first, live: a COPY --from into (or over) one of these
 # before an install may change the pip and Python it runs, which stops it. /root/.local and home folders hold the user
 # site-packages, which come before the image's own on sys.path.
-_PYTHON_HOMES = ("/usr/local/bin", "/usr/local/lib", "/usr/bin", "/usr/lib", "/bin", "/lib", "/root/.local", "/home")
+_PYTHON_HOMES = ("/usr/local/bin", "/usr/bin", "/bin", "/root/.local", "/home")
+_PYTHON_LIBS = ("/usr/local/lib", "/usr/lib", "/lib")
+
+
+# Modules `python -m pip` may import, which a file or folder of that name in the working folder (first on sys.path)
+# would replace: the standard library's, pip's own and the start-up hooks.
+_PIP_IMPORTS = frozenset(sys.stdlib_module_names) | {"pip", "setuptools", "pkg_resources", "_distutils_hack"}
+
+
+def _importable(name: str) -> bool:
+    """Whether a name in the working folder may be imported by `python -m pip` in place of the real module."""
+    return name.removesuffix(".py").split(".")[0] in _PIP_IMPORTS or name.endswith(".pth")
+
+
+def _over_image_python(dest: str) -> bool:
+    """Whether a COPY --from to `dest` may put another pip or Python in place of the image's: a bin folder, a user
+    site-packages, or a lib folder's Python (`/usr/local/lib/python3.13`, `libpython3.13.so`) or the lib folder
+    whole, not a lib folder's other entries (`/usr/local/lib/node_modules`)."""
+    return (
+        _within(dest, _PYTHON_HOMES)
+        or any(folder == dest or folder.startswith(dest.rstrip("/") + "/") for folder in _PYTHON_LIBS)
+        or re.search(r"/lib/(?:lib)?python", dest) is not None
+    )
+
+
 # What a path with Python in it looks like: a COPY --from with one is never only a note.
 _PYTHON_PATH_WORDS = (*_PACKAGE_PATH_WORDS, "pip", "lib", ".whl", ".egg", ".pth", ".py")
 
@@ -1993,6 +2018,7 @@ class _Install:
     unseen: int = 0  # how many lines wheelgap can't see into come before it (InputsReport.unseen)
     mounts: tuple[str, ...] = ()  # the folders a cache or tmpfs mount covers while it runs
     globs: tuple[str, ...] = ()  # unquoted `name[extra]` words, which the shell expands if a file in cwd matches
+    module: bool = False  # `python -m pip`, which imports from the working folder first
     created: int = 0  # how many of the reader's `created` come before it
 
 
@@ -2518,7 +2544,10 @@ class _RunReader:
                 module = option[2:] or (args[1].text if args[1].exact else None)
                 rest = args[1:] if len(option) > 2 else args[2:]
                 if module == "pip":
-                    return self._pip(number, rest, False, uv_system, shown, stop)
+                    kind, detail = self._pip(number, rest, False, uv_system, shown, stop)
+                    if isinstance(detail, _Install):
+                        detail.module = True
+                    return kind, detail
                 if module == "uv":
                     return self._uv(number, rest, uv_system, shown, stop)
                 if module in ("venv", "virtualenv"):
@@ -3096,6 +3125,7 @@ def _dockerfile_requirements(
             return
         raise DockerfileError(f"line {number}: {glob} is a glob to the shell, and {why}: {quote}")
 
+    python_dirs: dict[str, tuple[int, list[str]]] = {}  # ENV PYTHONPATH and the others: (line, their folders)
     reader = _RunReader(report, pythons, image_read)
     env: dict[str, str] = {}  # the ENV and ARG values wheelgap knows, as the shell of a RUN sees them
     uv_system = False  # ENV UV_SYSTEM_PYTHON=1: uv reads it as --system
@@ -3120,6 +3150,35 @@ def _dockerfile_requirements(
                 f"{where}, and may change what that install fetches or the pip and Python it runs, so "
                 "--dockerfile-inputs doesn't answer (such a line is only passed over, with a warning, after the "
                 "last install it reads)"
+            )
+        foreign = [
+            copy for copy in copies if copy.foreign is not None and not copy.uv_binaries and _may_hold_packages(copy)
+        ]
+        if dependencies and foreign:
+            # pip keeps a package the copy brought if it satisfies a requirement, and that older copy's own
+            # dependencies then decide what else is fetched: the set --deps follows isn't known.
+            raise DockerfileError(
+                f"line {foreign[0].line}: COPY --from={foreign[0].foreign} may bring installed packages, which pip "
+                f"keeps, and with --deps their dependencies change what the install on line {number} fetches"
+            )
+        if install.module and (
+            shadow := next(
+                (
+                    c
+                    for c in foreign
+                    if install.cwd is None
+                    or c.dest == install.cwd
+                    or (posixpath.dirname(c.dest) == install.cwd and _importable(posixpath.basename(c.dest)))
+                ),
+                None,
+            )
+        ):
+            # `python -m pip` puts the working folder first on sys.path: a pip (or a module pip imports) copied
+            # there is the one that runs.
+            raise DockerfileError(
+                f"line {shadow.line}: COPY --from={shadow.foreign} may put files in "
+                f"{install.cwd or 'the working folder'}, and `python -m pip` on line {number} imports from that "
+                "folder first, so it may run another pip"
             )
         uv = install.uv
         if uv and (config := next((copy for copy in copies if _copies_config(copy, _UV_CONFIG_NAMES)), None)):
@@ -3254,7 +3313,15 @@ def _dockerfile_requirements(
             if copy.foreign is not None and _may_hold_packages(copy):
                 what = f"COPY --from={copy.foreign} {' '.join(copy.foreign_paths)} {copy.dest}"
                 report.copied.append((number, what))
-                if _within(copy.dest, _PYTHON_HOMES) or _within(copy.dest, tuple(reader.venvs)):
+                if named := next(
+                    ((var, line) for var, (line, folders) in python_dirs.items() if _within(copy.dest, set(folders))),
+                    None,
+                ):
+                    # PYTHONPATH and friends were set before: Python now uses what this brings (patch B).
+                    report.unseen.append(
+                        (number, f"copies files into a folder ENV {named[0]} on line {named[1]} names ({what})")
+                    )
+                if _over_image_python(copy.dest) or _within(copy.dest, tuple(reader.venvs)):
                     # It may put another pip or Python in place of the one a later install runs.
                     report.unseen.append((number, f"copies files over the image's Python or pip ({what})"))
             elif copy.foreign is not None:
@@ -3325,6 +3392,7 @@ def _dockerfile_requirements(
                     )
                 if name in _PYTHON_PATH_VARIABLES or name in _CONFIG_VARIABLES:
                     written = _written_value(args, name) if keyword == "ENV" else value
+                    written = _expand_known(written, before) if written is not None else None
                     folders = [
                         posixpath.normpath(entry)
                         for entry in (written or "").split(":")
@@ -3344,9 +3412,13 @@ def _dockerfile_requirements(
                                 f"line {number}: {keyword} {name} makes pip read its config from a folder the COPY "
                                 f"--from={config.foreign} on line {config.line} brought, which may hold a pip.conf"
                             )
-                    elif hit := next(
-                        ((c, f) for f in folders for c in foreign if _within(c.dest, {f}) or _within(f, {c.dest})),
-                        None,
+                    else:
+                        python_dirs[name] = (number, folders)  # for a COPY --from after this ENV
+                    if name not in _CONFIG_VARIABLES and (
+                        hit := next(
+                            ((c, f) for f in folders for c in foreign if _within(c.dest, {f}) or _within(f, {c.dest})),
+                            None,
+                        )
                     ):
                         copy, folder = hit
                         what = (

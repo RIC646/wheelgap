@@ -4277,3 +4277,66 @@ def test_cli_dockerfile_inputs_unread_image_is_not_complete(tmp_path, capsys, fa
         "### wheelgap: the 1 package wheelgap read has a wheel for 1 target; the image wasn't read"
         in capsys.readouterr().out
     )
+
+
+_IMG = "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\n"
+_SITE = "COPY --from=python:3.12 /usr/local/lib/python3.12/site-packages"
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        # B: a folder PYTHONPATH and the others name, set before the COPY --from that fills it (q1, g21 to g24).
+        (
+            f"ENV PYTHONPATH=/deps\n{_SITE} /deps\n" + _INSTALL,
+            ":5: this line copies files into a folder ENV PYTHONPATH on line 4 names",
+        ),
+        (f"ENV PYTHONPATH=/deps:${{PYTHONPATH}}\n{_SITE} /deps\n" + _INSTALL, ":5: .*ENV PYTHONPATH on line 4 names"),
+        (f"ENV PYTHONPATH /deps\n{_SITE} /deps\n" + _INSTALL, ":5: .*ENV PYTHONPATH on line 4 names"),
+        ("ENV PYTHONUSERBASE=/deps\nCOPY --from=python:3.12 /usr/local /deps\n" + _INSTALL, ":5: .*ENV PYTHONUSERBASE"),
+        (f"ENV PYTHONPATH=/app\n{_SITE} /app/lib\n" + _INSTALL, ":5: .*ENV PYTHONPATH on line 4 names"),
+        ("ENV DEPS=/deps\nENV PYTHONPATH=$DEPS\n" + f"{_SITE} /deps\n" + _INSTALL, ":6: .*ENV PYTHONPATH on line 5"),
+        # g27: `python -m pip` imports from the working folder first.
+        (
+            "COPY --from=tools:1 /pip /app/pip\nRUN python -m pip install -r requirements.txt\n",
+            ":4: COPY --from=tools:1 may put files in /app, and `python -m pip`",
+        ),
+        (
+            "COPY --from=tools:1 /stuff/ /app/\nRUN python3 -m pip install -r requirements.txt\n",
+            ":4: .*`python -m pip`",
+        ),
+        ("COPY --from=tools:1 /x /app/json\nRUN python3 -m pip install -r requirements.txt\n", ":4: .*`python -m pip`"),
+    ],
+)
+def test_dockerfile_requirements_stops_on_a_copy_into_a_folder_python_uses(tmp_path, body, error):
+    with pytest.raises(DockerfileError, match=error):
+        dockerfile_requirements(_context(tmp_path, _IMG + body), report=InputsReport())
+
+
+def test_dockerfile_requirements_reads_copies_that_cant_change_the_install(tmp_path):
+    # g39: a lib folder's other entries aren't the image's Python; and `pip` (not `python -m pip`) doesn't import
+    # from the working folder.
+    for body in (
+        "COPY --from=node:20 /usr/local/lib/node_modules /usr/local/lib/node_modules\n" + _INSTALL,
+        "COPY --from=web:1 /dist /app/static\nRUN python -m pip install -r requirements.txt\n",
+    ):
+        report = InputsReport()
+        assert len(dockerfile_requirements(_context(tmp_path, _IMG + body), report=report)) == 1
+        assert [line for line, _ in report.copied] == [4]
+    for dest in ("/usr/local/lib", "/usr/local/lib/python3.13", "/usr/lib/libpython3.13.so.1.0", "/usr/local"):
+        with pytest.raises(DockerfileError, match="copies files over the image's Python or pip|a pip config file"):
+            dockerfile_requirements(_context(tmp_path, _IMG + f"COPY --from=x:1 /a {dest}\n" + _INSTALL))
+
+
+def test_dockerfile_requirements_stops_on_copied_packages_with_deps(tmp_path):
+    # pip keeps a copied package that satisfies a requirement, and its own dependencies then decide the rest.
+    path = _context(tmp_path, _IMG + "COPY --from=build:1 /packages /packages\n" + _INSTALL)
+    assert len(dockerfile_requirements(path)) == 1
+    with pytest.raises(DockerfileError, match=":4: COPY --from=build:1 may bring installed packages, which pip keeps"):
+        dockerfile_requirements(path, dependencies=True)
+
+
+def test_cli_dockerfile_inputs_names_one_line_in_the_singular(tmp_path, capsys, fake_pypi):
+    path = _context(tmp_path, _IMG + _INSTALL + "COPY --from=web:1 /dist /app/static\n")
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs"]) == 0
+    assert f"{path} line 5 copies files from another stage or image: any Python" in capsys.readouterr().out

@@ -1476,7 +1476,25 @@ def directory_notes(found: DirectoryInput) -> list[str]:
     if found.empty:
         return instead
     if found.reason == "pyproject":
-        return [f"no lockfile or requirements.txt in {found.directory}, so {found.path} was checked"]
+        beside = ""
+        if found.unpinned:  # the requirements files it was read over, the first 3 by name
+            shown = [path.relative_to(found.directory).as_posix() for path in found.unpinned]
+            if len(shown) > 3:
+                shown[3:] = [f"{len(shown) - 3} more"]
+            if len(shown) == 1:
+                beside = f" ({shown[0]} is there too, but isn't a compiled, fully pinned requirements file)"
+            else:
+                listed = ", ".join(shown[:-1]) + f" and {shown[-1]}"
+                beside = f" ({listed} are there too, but none is a compiled, fully pinned requirements file)"
+        return [
+            f"no lockfile and no file named requirements.txt in {found.directory}, so {found.path} was checked{beside}"
+        ]
+    if found.reason == "pinned":
+        return [
+            f"no lockfile and no file named requirements.txt in {found.directory}; {found.path} is compiled and "
+            f"pins every requirement, so it was checked rather than the ranges in "
+            f"{found.directory / 'pyproject.toml'}, since it is what gets installed"
+        ]
     if found.reason == "requirements":
         return [
             f"no lockfile, requirements.txt or pyproject.toml dependencies in {found.directory}, so its only "

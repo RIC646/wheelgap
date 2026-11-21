@@ -196,9 +196,63 @@ def test_read_lock_sources_duplicates_and_collisions(lock):
 def test_emulated_follows_platform_machine_on_windows_x86_64_only(lock):
     # winthing's edge turns on platform_machine == 'AMD64', which uv's x86_64-pc-windows-msvc says is x86_64;
     # below is under it. appnope's conflict clause names extras, not an emulated marker.
-    assert lock.emulated(WIN) == {"winthing", "below"}
-    assert lock.emulated(WIN_ARM) == set()
-    assert lock.emulated(LINUX) == set()
+    # winthing's parent is the project itself, which uv walks through without installing it.
+    assert lock.emulated(WIN, installed=set()) == {"winthing", "below"}
+    assert lock.emulated(WIN_ARM, installed=set()) == set()
+    assert lock.emulated(LINUX, installed=set()) == set()
+
+
+# ai-agent-book's shape: browser-use -> pyobjc only through `platform_system == 'darwin'` (never true: CPython says
+# "Darwin") or a clause that needs both sides of a conflict, and pyobjc's framework edges on platform_release.
+GATED_LOCK = """\
+version = 1
+revision = 3
+requires-python = ">=3.10"
+conflicts = [[{ package = "a", extra = "x" }, { package = "a", extra = "y" }]]
+
+[[package]]
+name = "a"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "gate", marker = "platform_system == 'darwin' or (extra == 'extra-1-a-x' and extra == 'extra-1-a-y')" }]
+
+[[package]]
+name = "gate"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "child", marker = "platform_release >= '20.0'" }]
+wheels = [{ url = "https://files.pythonhosted.org/g/gate-1.0-py3-none-any.whl" }]
+
+[[package]]
+name = "child"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/c/child-1.0-py3-none-any.whl" }]
+"""  # noqa: E501
+
+
+def test_emulation_needs_an_installed_parent(tmp_path):
+    path = tmp_path / "uv.lock"
+    path.write_text(GATED_LOCK, encoding="utf-8")
+    lock = script.read_lock(path)
+    # uv installs neither gate nor child on Linux: child's platform_release edge can't explain that, so it counts.
+    assert lock.emulated(LINUX, installed=set()) == set()
+    assert lock.emulated(LINUX, installed={"gate"}) == {"child"}
+    wheelgap = {
+        "rows": {"gate==1.0 @ https://pypi.org/simple": "wheel", "child==1.0 @ https://pypi.org/simple": "wheel"}
+    }
+    cells = script.compare(
+        entry=ENTRY, referee="uv sync", mode="all", target=LINUX, wheelgap=wheelgap, answer={"status": {}}, lock=lock
+    )
+    assert {c.package.split("==")[0]: c.verdict for c in cells} == {"child": "disagree", "gate": "disagree"}
+    # When uv installs gate, child's answer turns on the emulated platform_release: not compared, even if it agrees.
+    answer = {
+        "status": {"gate==1.0 @ https://pypi.org/simple": "wheel", "child==1.0 @ https://pypi.org/simple": "wheel"}
+    }
+    cells = script.compare(
+        entry=ENTRY, referee="uv sync", mode="all", target=LINUX, wheelgap=wheelgap, answer=answer, lock=lock
+    )
+    assert {c.package.split("==")[0]: c.verdict for c in cells} == {"child": "not compared", "gate": "agree"}
 
 
 @pytest.mark.parametrize(
@@ -534,6 +588,12 @@ def test_compare_pip_source_needs_the_sdists_requires_python():
     assert got[("m==3.1.0", "missing", "source")][0] == "not compared"
     assert "Requires-Python <3.15" in got[("m==3.1.0", "missing", "source")][1]
     assert got[("n==1", "missing", "source")][0] == "disagree"
+    # Nor does it agree: "source" is no evidence when the sdist's Requires-Python leaves the target out.
+    wheelgap = {"rows": {"m==3.1.0": "source"}, "results": {"m==3.1.0": result}}
+    got = _verdicts(
+        script.compare(entry=ENTRY, referee="pip", mode="all", target=LINUX, wheelgap=wheelgap, answer=answer)
+    )
+    assert got[("m==3.1.0", "source", "source")][0] == "not compared"
 
 
 def test_compare_uv_pip_compile_is_wheel_or_not():
@@ -575,6 +635,78 @@ def test_totals_and_exit_code(capsys):
     assert script.report(cells[:1], versions, 1.0) == 0
 
 
+def test_report_keeps_target_level_cells_out_of_the_rate(capsys):
+    cells = [
+        script.Cell("o/p", "uv.lock", "uv sync", "all", "3.13 linux-x86_64", "a==1", "wheel", "wheel", "agree"),
+        script.Cell(
+            "o/p", "uv.lock", "uv sync", "all", "3.15 linux-x86_64", "*", "refused", "refused", "agree", "both"
+        ),
+        script.Cell(
+            "o/q", "uv.lock", "uv sync", "all", "3.13 linux-x86_64", "*", "-", "refused", "not compared", "old uv"
+        ),
+    ]
+    versions = {"uv": "uv", "pip": "pip", "wheelgap": "0", "wheelgap_commit": "abc", "checkout_head": "def"}
+    assert script.report(cells, versions, 1.0) == 0
+    out = capsys.readouterr().out
+    assert "1 cells: 1 compared, 1 agree, 0 disagree (100.00% agree), 0 not compared" in out
+    assert "Target-level cells (not in the rate): 2" in out
+    assert "Input × targets with a package compared: 1 of 3 (66.7% excluded)" in out
+    assert "Nothing compared: o/q" in out
+    data = script.results_json(cells, versions, [LINUX], {"inputs": []}, 1.0)
+    assert data["totals"]["uv.lock vs uv sync (all)"]["cells"] == 1
+    assert data["target_level"]["uv.lock vs uv sync (all)"]["cells"] == 2
+    assert data["coverage"]["uv.lock vs uv sync (all)"]["inputs_with_nothing_compared"] == ["o/q"]
+
+
+def test_cache_key_covers_what_changes_an_answer(tmp_path):
+    glibc_217 = make_targets("3.13", "linux-x86_64", glibc="2.17")[0]
+    command = ["uv", "sync"]
+    one = script.cache_path(tmp_path, "d", "uv sync", LINUX, "uv 1", command)
+    assert one == script.cache_path(tmp_path, "d", "uv sync", LINUX, "uv 1", command)
+    assert one != script.cache_path(tmp_path, "d", "uv sync", glibc_217, "uv 1", command)  # same label, other libc
+    assert one != script.cache_path(tmp_path, "d", "uv sync", LINUX, "uv 2", command)
+    assert one != script.cache_path(tmp_path, "d", "uv sync", LINUX, "uv 1", [*command, "--x"])
+    assert one.parent == tmp_path / "d"
+
+
+def test_cacheable():
+    assert script.cacheable({"status": {}})
+    assert not script.cacheable({"error": "uv timed out"})
+    refused = {"label": "all", "error": "error: The current Python platform ...", "refused": "environments"}
+    assert script.cacheable({"selections": [refused]})
+    assert not script.cacheable(
+        {"selections": [{"label": "all", "error": "error: No interpreter found", "refused": None}]}
+    )
+
+
+def test_sync_selection_never_takes_a_timeout_for_an_answer(lock, tmp_path):
+    def fake(cmd, cwd, env):
+        return -1, "error: timed out after 300 s"
+
+    with pytest.raises(script.RefereeError, match="timed out"):
+        script.sync_selection(fake, tmp_path, {}, ["uv", "sync"], script.Selection("all", []), lock)
+
+
+def test_check_input_stages_outside_the_output_folder(tmp_path, monkeypatch):
+    src = tmp_path / "repo"
+    src.mkdir()
+    (src / "uv.lock").write_text(LOCK, encoding="utf-8")
+    entry = {"id": "o/p", "kind": "uv.lock", "dir": str(src), "main": "uv.lock", "files": ["uv.lock"]}
+    seen = []
+
+    def fake(cmd, cwd, env):
+        seen.append(Path(cwd))
+        return (0, "/py/python3.13\n") if cmd[1] == "python" else (0, " + appnope==0.1.4\n")
+
+    out = tmp_path / "out"
+    versions = {"uv": "uv 0.13.1", "pip": "pip", "wheelgap": "0", "wheelgap_commit": "abc"}
+    cells = script.check_input(entry, [MAC], out, versions, fake, workers=1)
+    assert cells and all(c.target == "3.13 macos-arm64" for c in cells)
+    assert seen and all(out not in cwd.parents for cwd in seen)  # the copy is a temporary folder...
+    assert not any(cwd.exists() for cwd in seen)  # ...removed afterwards
+    assert sorted(p.name for p in out.iterdir()) == ["cache"]
+
+
 # --- requirements files -----------------------------------------------------------------------------------------
 
 
@@ -593,7 +725,22 @@ def test_flatten_reads_includes_and_markers(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("line", ["--no-binary :all:", "-c constraints.txt", "-e .", "six>=1", "-r missing.txt"])
+@pytest.mark.parametrize(
+    "line",
+    [
+        "--no-binary :all:",
+        "--only-binary :none:",
+        "--only-binary=:none:",
+        "--find-links x",
+        "-f x",
+        "--config-settings a=b",
+        "-c constraints.txt",
+        "-e .",
+        "six>=1",
+        "-r missing.txt",
+        "idna==3.10 --no-binary idna",
+    ],
+)
 def test_flatten_refuses(tmp_path, line):
     (tmp_path / "requirements.txt").write_text(f"{line}\nidna==3.10\n", encoding="utf-8")
     assert script.flatten(tmp_path / "requirements.txt").refuse
@@ -654,6 +801,14 @@ def test_pip_referee(tmp_path):
     first = fake.calls[0]
     assert "--only-binary=:all:" in first and "--no-deps" in first and "--isolated" in first
     assert first[first.index("--abi") + 1] == "cp313"
+
+
+def test_pip_referee_stops_at_a_build(tmp_path):
+    def fake(cmd, cwd, env):
+        return 0, "Preparing metadata (pyproject.toml): started\n"
+
+    flat = script.Flat([script.Pin("a", "1.0", "", "a==1.0")], [])
+    assert "started a build" in script.pip_referee(fake, tmp_path, LINUX, flat, tmp_path)["error"]
 
 
 def test_pip_referee_needs_evidence(tmp_path):

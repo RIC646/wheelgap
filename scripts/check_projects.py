@@ -16,7 +16,18 @@ The manifest is a JSON file listing the inputs: `manifest` writes one from a cor
 `repos/<owner>__<name>/` folders), taking each repo's root uv.lock (with its pyproject.toml and uv.toml), root
 poetry.lock, and root requirements.txt if every requirement in it is pinned with `==`. The inputs are untrusted
 data: nothing in them is run, no project is installed and no build backend runs. Each input's files are copied
-into a fresh folder, and uv and pip only read them there.
+into a fresh temporary folder (removed afterwards), and uv and pip only read them there:
+- uv sync runs as a dry run, which plans from the lock without building; pass 1 adds --no-build, and every uv
+  run stops the check if its output says it built anything;
+- pip and uv pip compile run with --only-binary :all:, and a requirements file passes on only index options
+  (-i/--index-url, --extra-index-url, --trusted-host, --pre, --prefer-binary): any other option, such as an
+  --only-binary :none: or --find-links that would bring back an sdist, refuses the file before a referee runs;
+  pip's log is also checked for "Preparing metadata", "Getting requirements to build" and "Building wheel";
+- poetry is never run.
+This was checked with a canary sdist whose setup.py writes a file: given in a requirements file with
+`--only-binary :none:` and `--find-links`, the file is refused and the canary never runs (it does run, and the pip
+check above catches it, when the allow-list is bypassed by hand); locked in a uv.lock from a find-links folder,
+uv sync's dry run reports it `source` without running it.
 
 uv.lock: the referee is `uv sync --frozen --dry-run --offline` itself, with --python-platform and --python for the
 target and --no-install-project --no-install-workspace --no-install-local, in the copy (it reads the lock and
@@ -46,8 +57,9 @@ scripts/check_against_pip.py asks for (pip fetched the project's page, with no r
 --platform, so a requirement with a marker isn't compared with pip; uv evaluates them for the target. uv can't tell
 `source` from `missing` here, so that comparison is wheel / no wheel, and uv's known Requires-Python difference
 (it ignores an upper bound; wheelgap answers a requirements file as pip does) is not compared, as in
-check_against_pip.py. --only-binary keeps pip and uv from building anything to read metadata: an input with
---no-binary is not compared.
+check_against_pip.py. pip's "source" (an sdist that --only-binary skipped) isn't compared when the sdist's
+Requires-Python leaves the target out, since pip's log can't show that check. --only-binary keeps pip and uv from
+building anything to read metadata (see above for the options that would override it).
 
 poetry.lock: not compared. Poetry has no way to install for another platform (no --platform), it isn't installed
 here, and running it on an untrusted project is what this script must not do. Each poetry.lock input is listed as
@@ -57,7 +69,10 @@ Emulation limits are not counted against wheelgap. uv's --python-platform sets m
 real interpreter: x86_64-pc-windows-msvc says platform_machine `x86_64` where CPython on Windows says `AMD64`, and
 platform_release and platform_version are empty; uv's python_full_version is the patch release of the interpreter
 it runs (3.13.13), where wheelgap's target is the release in general. A difference in a package whose dependency
-path or fork in the lock turns on one of those markers is listed as not compared, with the reason. Targets a referee
+path or fork in the lock turns on one of those markers is listed as not compared, agreeing or not, with the reason:
+an edge counts when its parent is one uv installs on the target (or the project, a member, a path, git or URL
+package, which uv walks through), or is itself in that set, so an edge from a package uv never installs can't hide a
+wrong row below it. Targets a referee
 refuses (uv: outside the lock's `environments`, or outside the project's requires-python) are compared at the
 target level: when wheelgap refuses too, they agree; when wheelgap answers for a Python the project excludes, that is
 wheelgap's design (it shows what blocks the upgrade), so it is not compared. So that such a project is compared at
@@ -68,11 +83,16 @@ project's `python-preference = "only-managed"` doesn't stop it: it picks where t
 installs.
 
 Output (-o DIR): results.json (tool versions, totals, per target and per input kind, every cell with both answers,
-the verdict, the reason and the referee command) and report.txt (the totals, the agreement rate per target and per
-input kind, and the disagreements grouped by what differs, each with a command to reproduce it). The referee's
-answers are cached in DIR/cache, keyed by the input's files, the target, the tool's version and this script's
-referee version, so a rerun on a new wheelgap commit only recomputes wheelgap's side. Exit code: 0 when every
-compared cell agrees, 1 if any disagrees, 2 if a check couldn't be made.
+the verdict, the reason and the referee command for every cell that doesn't agree) and report.txt (the totals, the
+agreement rate per target and per input kind, and the disagreements grouped by what differs, each with a command to
+reproduce it). Rates are over per-package cells; target-level cells (package `*`: a target both refuse, one refuses,
+or one that couldn't be compared) are counted on their own, with the share of input × targets that had nothing
+compared and the inputs with nothing compared at all. The referees' answers are cached in DIR/cache (DIR holds
+nothing else of the inputs), keyed by the input's files, the target in full, the tool's version, the referee's exact
+command, the macOS deployment target, this script's referee version and, for pip and uv pip compile (which read the
+live index), the day; an answer with an error (a timeout, a network failure, a uv error that isn't a refusal) isn't
+kept. So a rerun on a new wheelgap commit only recomputes wheelgap's side. Exit code: 0 when every compared cell
+agrees, 1 if any disagrees, 2 if a check couldn't be made.
 
 It needs uv on PATH with CPython 3.13 and 3.15 installed for it (`uv python install 3.13 3.15`), pip in this
 environment, and the network for pip and for wheelgap's own lookups (uv.lock checks are offline for uv). The tests
@@ -109,6 +129,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name, parse_sdist_filename
 from packaging.version import InvalidVersion, Version
 
+import wheelgap
 from wheelgap import Result, __version__, check_lockfile, make_targets
 from wheelgap.check import Status
 from wheelgap.sources import SourceError
@@ -242,7 +263,7 @@ def make_manifest(corpus: Path) -> dict:
 def included_files(folder: Path, name: str, seen: set[str] | None = None) -> list[str]:
     """The files a requirements file includes with -r / -c, relative to the folder, if they are there."""
     seen = seen if seen is not None else {name}
-    out = []
+    out: list[str] = []
     try:
         text = (folder / name).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -372,7 +393,8 @@ class LockInfo:
     edges: dict[str, list[tuple[str, str]]]  # name -> [(dependency name, marker)]
     fork_markers: dict[str, list[str]]  # name -> resolution-markers of its entries
     requires_python: str = ""
-    _emulated: dict[Target, set[str]] = field(default_factory=dict, repr=False)
+    _emulated: dict[tuple[Target, frozenset[str]], set[str]] = field(default_factory=dict, repr=False)
+    _depends: dict[Target, dict[str, bool]] = field(default_factory=dict, repr=False)
 
     @property
     def skipped_names(self) -> set[str]:
@@ -402,28 +424,43 @@ class LockInfo:
         matching = [e for e in entries if wanted and e.files == wanted]
         return matching[0].url if len(matching) == 1 else None
 
-    def emulated(self, target: Target) -> set[str]:
-        """Names whose install or version on the target may turn on a marker uv emulates (emulated_markers()):
-        the dependencies of an edge whose marker depends on one, and everything below them."""
-        if target in self._emulated:
-            return self._emulated[target]
+    @property
+    def members(self) -> set[str]:
+        """Names uv walks through though it doesn't install them from an index here: the project, workspace members,
+        path, git and URL packages (left out with --no-install-*, but their dependencies are installed)."""
+        return {e.name for e in self.entries if e.kind != "registry"}
+
+    def emulated(self, target: Target, installed: Iterable[str]) -> set[str]:
+        """Names whose install or version on the target may turn on a marker uv emulates (emulated_markers()), given
+        the names uv installs there (`installed`). A package is in it when its fork markers depend on an emulated
+        marker, or when an edge whose marker does leads to it from a package uv installs (or one already in it), and
+        then so is everything below it. An edge from a package uv doesn't install can't explain uv's answer, so it
+        doesn't count: otherwise a wrong row reached through it would be hidden."""
+        live = frozenset(installed) | self.members
+        cache_key = (target, live)
+        if cache_key in self._emulated:
+            return self._emulated[cache_key]
         variables = emulated_markers(target)
-        checked: dict[str, bool] = {}
+        checked: dict[str, bool] = self._depends.setdefault(target, {})
 
         def depends(marker: str) -> bool:
             if marker not in checked:
                 checked[marker] = depends_on_emulation(marker, target, variables)
             return checked[marker]
 
-        seeds = {dep for edges in self.edges.values() for dep, marker in edges if marker and depends(marker)}
-        seeds |= {name for name, markers in self.fork_markers.items() if any(depends(m) for m in markers)}
-        out, todo = set(), list(seeds)
-        while todo:
-            name = todo.pop()
-            if name not in out:
-                out.add(name)
-                todo += [dep for dep, _ in self.edges.get(name, [])]
-        self._emulated[target] = out
+        out = {name for name, markers in self.fork_markers.items() if any(depends(m) for m in markers)}
+        changed = True
+        while changed:
+            changed = False
+            for parent, edges in self.edges.items():
+                inside = parent in out
+                if not inside and parent not in live:
+                    continue
+                for dep, marker in edges:
+                    if dep not in out and (inside or (marker and depends(marker))):
+                        out.add(dep)
+                        changed = True
+        self._emulated[cache_key] = out
         return out
 
 
@@ -438,7 +475,9 @@ def _filename(item: dict) -> str | None:
 
 def read_lock(path: Path) -> LockInfo:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    entries, edges, forks = [], defaultdict(list), defaultdict(list)
+    entries: list[LockEntry] = []
+    edges: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    forks: dict[str, list[str]] = defaultdict(list)
     for package in data.get("package", []):
         name = canonicalize_name(package["name"])
         source = package.get("source", {})
@@ -504,9 +543,7 @@ _REQUIRES_PYTHON = re.compile(
     r"which is incompatible with the project's Python requirement|is not compatible with the locked Python requirement"
 )
 _UV_VERSION = re.compile(r"Required uv version `[^`]*` does not match the running version")
-_CONFLICT = re.compile(r"are incompatible with the declared conflicts|are incompatible with the conflicts")
 _BUILT = re.compile(r"^\s*(Building|Built) ", re.M)
-_INTERPRETER = re.compile(r"^Using (\S+ [\w.+]+)(?: interpreter at: (.+))?$", re.M)
 
 
 @dataclass(frozen=True)
@@ -585,10 +622,10 @@ def conflict_selections(conflicts: list[list[dict[str, str]]], limit: int = 64) 
         options.append([flags, *([f for f in flags if f != keep] for keep in flags)])
     selections, seen = [], set()
     for combo in itertools.product(*options):
-        flags = tuple(sorted({flag for part in combo for flag in part}))
-        if flags not in seen:
-            seen.add(flags)
-            selections.append([arg for flag in flags for arg in flag])
+        picked = tuple(sorted({flag for part in combo for flag in part}))
+        if picked not in seen:
+            seen.add(picked)
+            selections.append([arg for flag in picked for arg in flag])
         if len(selections) > limit:
             return f"more than {limit} ways to pick the conflicts"
     return selections or [[]]
@@ -625,6 +662,8 @@ def sync_selection(
         selection.runs += 1
         if _BUILT.search(output):
             raise RefereeError(f"uv built a package during a dry run: {first_error(output)}")
+        if code < 0:  # run_command's timeout or OSError: not an answer, and never cached
+            raise RefereeError(first_error(output))
         return code, output, cmd
 
     nowheel: dict[str, DistError] = {}
@@ -748,6 +787,7 @@ class Flat:
     refuse: str | None = None
 
 
+_SAFE_OPTION = re.compile(r"^(-i|--index-url|--extra-index-url|--trusted-host|--pre|--prefer-binary)\b")
 _INCLUDE = re.compile(r"^(?:-r|--requirement)(?:\s*=\s*|\s+|(?=\S))(\S+)$")
 
 
@@ -768,8 +808,11 @@ def flatten(path: Path, seen: set[Path] | None = None) -> Flat:
             flat.options += sub.options
             continue
         if line.startswith("-"):
-            if re.match(r"^(-c|--constraint|--no-binary|-e|--editable)\b", line):
-                return Flat([], [], refuse=f"{line.split()[0]} in the file: the referees would read it differently")
+            # Only options that change where pip and uv look, never what they may build: anything else (an
+            # --only-binary :none: or --no-binary that overrides --only-binary=:all:, --find-links to a local
+            # sdist, -c, -e, --config-settings, ...) refuses the file, so no referee ever runs a build backend.
+            if not _SAFE_OPTION.match(line):
+                return Flat([], [], refuse=f"{line.split()[0]} in the file: only index options are passed to referees")
             flat.options.append(line)
             continue
         text = strip_hashes(line)
@@ -796,6 +839,8 @@ def pip_command(target: Target, requirements: Path, report: Path, cache: Path) -
     ]
 
 
+# What pip logs before it runs a build backend (to read an sdist's metadata or build a wheel).
+_PIP_BUILT = re.compile(r"Preparing metadata|Getting requirements to build|Building wheel")
 _PIP_NO_MATCH = re.compile(r"No matching distribution found for (?P<req>\S+)")
 _PIP_NO_SOURCES = re.compile(r"Skipping link: No sources permitted for [^:]+: (?P<url>\S+)")
 
@@ -842,9 +887,13 @@ def pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, cache: Pa
             requirements.write_text("\n".join([*flat.options, *(p.line for p in left)]) + "\n", encoding="utf-8")
             report.unlink(missing_ok=True)
             cmd = pip_command(target, requirements, report, cache)
-            command = shlex.join(["pip", *cmd[3:-8], *cmd[-7:-1]]).replace(str(requirements), "requirements.txt")
+            # As a user would type it: without the report and cache paths, which are this run's own.
+            shown = [*cmd[3 : cmd.index("--report")], *cmd[cmd.index("--report") + 2 : cmd.index("--cache-dir")]]
+            command = shlex.join(["pip", *shown]).replace(str(requirements), "requirements.txt")
             code, log = run(cmd, folder, env)
             runs += 1
+            if built := _PIP_BUILT.search(log):
+                return {"error": f"pip started a build ({built[0]}): the input must be refused", "command": command}
             if code == 0:
                 planned = pip_installed(report)
                 if planned is None:
@@ -919,6 +968,8 @@ def uv_pip_referee(run: Runner, folder: Path, target: Target, flat: Flat, confdi
                 command = f"MACOSX_DEPLOYMENT_TARGET={env['MACOSX_DEPLOYMENT_TARGET']} {command}"
             code, output = run(cmd, folder, env)
             runs += 1
+            if _BUILT.search(output):
+                return {"error": f"uv built a package: {first_error(output)}", "command": command}
             if code == 0:
                 listed = {
                     (canonicalize_name(n), norm_version(v))
@@ -1047,7 +1098,8 @@ def compare(
     status: dict[str, str] = answer["status"]
     commands: dict[str, str] = answer.get("commands", {})
     skipped: dict[str, str] = answer.get("not_compared", {})
-    emulated = lock.emulated(target) if lock is not None else set()
+    installed = {split_key(k)[0] for k in status}
+    emulated = lock.emulated(target, installed) if lock is not None else set()
     collisions = lock.collisions if lock is not None else set()
     ambiguous = set(wheelgap.get("ambiguous", []))
     results: dict[str, Result] = wheelgap.get("results", {})
@@ -1065,9 +1117,9 @@ def compare(
             why = "the lock has this name from a registry and from git or a URL: --no-install-package can't keep one"
         elif key(name, version) in ambiguous and w != ABSENT:
             why = "this name and version come from two indexes, and wheelgap's row matches neither lock entry's files"
-        elif not same(w, a, referee) and name in emulated:
+        elif name in emulated:  # agreeing or not: uv's answer for it can't vouch for the target's
             why = emulation_reason(target)
-        elif referee == "pip" and w == MISSING and a == SOURCE and package in results:
+        elif referee == "pip" and a == SOURCE and package in results:
             capped = sorted(
                 why for f, why in results[package].requires_python_rejected.items() if not f.endswith(".whl")
             )
@@ -1153,21 +1205,45 @@ def tool_versions() -> dict[str, str]:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f"unavailable ({exc})"
-        return (proc.stdout or proc.stderr).strip().splitlines()[0] if proc.returncode == 0 else "unavailable"
+        if proc.returncode != 0:
+            return "unavailable"
+        return next(iter((proc.stdout or proc.stderr).strip().splitlines()), "")
 
     pip_version = re.sub(r" from .* \(python", " (python", first_line([sys.executable, "-m", "pip", "--version"]))
-    commit = first_line(["git", "-C", str(Path(__file__).resolve().parents[1]), "rev-parse", "HEAD"])
+    # The wheelgap being measured is the one imported, which needn't be this script's checkout: name the last commit
+    # that changed its source (what the answers depend on), the checkout's HEAD, and whether the source is edited.
+    package = Path(wheelgap.__file__).resolve().parent
+    git = ["git", "-C", str(package)]
+    src = first_line([*git, "log", "-1", "--format=%H", "--", "."])
+    dirty = first_line([*git, "status", "--porcelain", "--", "."]) not in ("", "unavailable")
     return {
         "uv": first_line(["uv", "--version"]),
         "pip": pip_version,
         "wheelgap": __version__,
-        "wheelgap_commit": commit,
+        "wheelgap_commit": src + (" (edited)" if dirty else ""),
+        "checkout_head": first_line([*git, "rev-parse", "HEAD"]),
     }
 
 
-def cache_path(cache: Path, digest: str, referee: str, target: Target, version: str) -> Path:
-    tag = hashlib.sha256(f"{REFEREE_VERSION[referee]}\0{referee}\0{version}".encode()).hexdigest()[:12]
+def cache_path(cache: Path, digest: str, referee: str, target: Target, version: str, command: Sequence[str]) -> Path:
+    """Where a referee's answer is kept: keyed by the input's files (digest), the target in full, the tool's version,
+    the referee's exact command for the target and its macOS deployment target, this script's referee version, and,
+    for pip and uv pip compile, which read the live index, today's UTC date."""
+    parts = [str(REFEREE_VERSION[referee]), referee, version, repr(target), shlex.join(command)]
+    if target.platform.startswith("macos-"):
+        parts.append(pin.uv_deployment_target(target))
+    if referee != "uv sync":
+        parts.append(datetime.datetime.now(datetime.UTC).date().isoformat())
+    tag = hashlib.sha256("\0".join(parts).encode()).hexdigest()[:16]
     return cache / digest / f"{referee.replace(' ', '-')}--{pin.label(target).replace(' ', '_')}--{tag}.json"
+
+
+def cacheable(answer: dict) -> bool:
+    """An answer worth keeping: no error (one may be the network's or a timeout's), and every uv sync selection
+    either answered or was a refusal uv makes for the input itself (environments, requires-python, uv version)."""
+    if answer.get("error"):
+        return False
+    return all(not s.get("error") or s.get("refused") for s in answer.get("selections", []))
 
 
 def cached(path: Path, compute: Callable[[], dict]) -> dict:
@@ -1176,7 +1252,7 @@ def cached(path: Path, compute: Callable[[], dict]) -> dict:
     except (OSError, ValueError):
         pass
     answer = compute()
-    if not answer.get("error"):  # an error may be the network's: ask again next time
+    if cacheable(answer):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(answer, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return answer
@@ -1227,10 +1303,30 @@ def check_input(
     if kind == "poetry.lock":
         why = "no referee: Poetry can't install for another platform, and it isn't run on untrusted projects here"
         return [Cell(entry["id"], kind, "-", "all", pin.label(t), "*", "-", "-", NOT_COMPARED, why) for t in targets]
-    work = out / "work"
+    work = Path(tempfile.mkdtemp(prefix="wheelgap-projects-"))
+    try:
+        return _check_staged(entry, targets, out, versions, run, workers, own_python, work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _check_staged(
+    entry: dict,
+    targets: Sequence[Target],
+    out: Path,
+    versions: dict[str, str],
+    run: Runner,
+    workers: int,
+    own_python: bool,
+    work: Path,
+) -> list[Cell]:
+    """check_input()'s work, with the input copied into `work` (a fresh temporary folder: uv must find no project
+    above it, and nothing of the input is left behind)."""
+    kind = entry["kind"]
+    check_workdir(work)
     folder = stage(entry, work)
     digest = folder.name
-    confdir = out / "work" / "_no_uv_config"
+    confdir = work / "_no_uv_config"
     confdir.mkdir(parents=True, exist_ok=True)
     main = folder / entry["main"]
     cells: list[Cell] = []
@@ -1242,8 +1338,9 @@ def check_input(
             targets = [*targets, *own_targets(lock.requires_python, targets)]
 
         def ask(target: Target) -> dict:
+            command = uv_sync_base(target, pin.uv_platform(target) or "")
             return cached(
-                cache_path(cache, digest, "uv sync", target, version),
+                cache_path(cache, digest, "uv sync", target, version, command),
                 lambda: uv_sync_referee(run, folder, target, lock, confdir),
             )
 
@@ -1284,14 +1381,16 @@ def check_input(
     pip_cache = out / "cache" / "_pip-http"
 
     def ask_pip(target: Target) -> dict:
+        command = pip_command(target, Path("requirements.txt"), Path("report.json"), Path("cache"))
         return cached(
-            cache_path(cache, digest, "pip", target, versions["pip"]),
+            cache_path(cache, digest, "pip", target, versions["pip"], command),
             lambda: pip_referee(run, folder, target, flat, pip_cache),
         )
 
     def ask_uv(target: Target) -> dict:
+        command = uv_compile_command(target, pin.uv_platform(target) or "", Path("requirements.txt"))
         return cached(
-            cache_path(cache, digest, "uv pip compile", target, versions["uv"]),
+            cache_path(cache, digest, "uv pip compile", target, versions["uv"], command),
             lambda: uv_pip_referee(run, folder, target, flat, confdir),
         )
 
@@ -1350,6 +1449,30 @@ def breakdown(cells: Sequence[Cell], attr: str) -> dict[str, dict[str, Any]]:
     return {k: totals(v) for k, v in sorted(groups.items())}
 
 
+def package_cells(cells: Sequence[Cell]) -> list[Cell]:
+    """The per-package cells: the agreement rates are over these only."""
+    return [c for c in cells if c.package != "*"]
+
+
+def target_cells(cells: Sequence[Cell]) -> list[Cell]:
+    """The target-level cells (package `*`): a target both refuse, one refuses, or that couldn't be compared."""
+    return [c for c in cells if c.package == "*"]
+
+
+def coverage(cells: Sequence[Cell]) -> dict[str, Any]:
+    """How much of the input × target grid had any package compared, and the inputs with nothing compared at all."""
+    pairs = {(c.input, c.target) for c in cells}
+    compared = {(c.input, c.target) for c in package_cells(cells) if c.verdict != NOT_COMPARED}
+    inputs = sorted({c.input for c in cells})
+    none = [i for i in inputs if not any(p[0] == i for p in compared)]
+    return {
+        "input_targets": len(pairs),
+        "input_targets_compared": len(compared),
+        "excluded_share": round(1 - len(compared) / len(pairs), 4) if pairs else None,
+        "inputs_with_nothing_compared": none,
+    }
+
+
 def cause(c: Cell) -> str:
     """A disagreement's group: the referee and mode, then what differs."""
     return f"{c.kind} vs {c.referee} ({c.mode}): {c.why}"
@@ -1369,8 +1492,11 @@ def results_json(
         "tools": versions,
         "targets": [pin.label(t) for t in targets],
         "inputs": len({(e["id"], e["kind"]) for e in manifest["inputs"]}),
-        "totals": {name: totals(group) for name, group in sorted(sets.items())},
-        "by_target": {name: breakdown(group, "target") for name, group in sorted(sets.items())},
+        # Rates are per package; target-level cells (package "*") are counted on their own.
+        "totals": {name: totals(package_cells(group)) for name, group in sorted(sets.items())},
+        "target_level": {name: totals(target_cells(group)) for name, group in sorted(sets.items())},
+        "coverage": {name: coverage(group) for name, group in sorted(sets.items())},
+        "by_target": {name: breakdown(package_cells(group), "target") for name, group in sorted(sets.items())},
         # An agreeing cell's command is the one its target's other cells share: kept only where it explains something.
         "cells": [dict(c.__dict__, command="") if c.verdict == AGREE else c.__dict__ for c in cells],
     }
@@ -1382,19 +1508,36 @@ def report(cells: Sequence[Cell], versions: dict[str, str], seconds: float, out=
     for c in cells:
         sets[f"{c.kind} vs {c.referee} ({c.mode})"].append(c)
     print(
-        f"Tools: {versions['uv']}; {versions['pip']}; wheelgap {versions['wheelgap']} at "
-        f"{versions['wheelgap_commit'][:12]}. {seconds:.0f} s.",
+        f"Tools: {versions['uv']}; {versions['pip']}; wheelgap {versions['wheelgap']}, source last changed in "
+        f"{versions['wheelgap_commit'][:12]} (checkout at {versions.get('checkout_head', '?')[:12]}). {seconds:.0f} s.",
         file=out,
     )
-    for name, group in sorted(sets.items()):
+    for name, whole in sorted(sets.items()):
+        group = package_cells(whole)
         t = totals(group)
         rate = "n/a" if t["agreement"] is None else f"{t['agreement']:.2%}"
-        inputs = len({c.input for c in group})
+        inputs = len({c.input for c in whole})
         print(
             f"\n{name}: {inputs} inputs, {t['cells']} cells: {t['compared']} compared, {t['agree']} agree, "
             f"{t['disagree']} disagree ({rate} agree), {t['not_compared']} not compared.",
             file=out,
         )
+        level = target_cells(whole)
+        if level:
+            reasons = Counter(f"{c.verdict}: {c.why}" for c in level)
+            print(f"  Target-level cells (not in the rate): {len(level)}", file=out)
+            for why, n in reasons.most_common():
+                print(f"    {n:5d}  {why[:150]}", file=out)
+        cov = coverage(whole)
+        if cov["input_targets"]:
+            share = cov["excluded_share"] or 0.0
+            print(
+                f"  Input × targets with a package compared: {cov['input_targets_compared']} of "
+                f"{cov['input_targets']} ({share:.1%} excluded).",
+                file=out,
+            )
+            if cov["inputs_with_nothing_compared"]:
+                print("  Nothing compared: " + ", ".join(cov["inputs_with_nothing_compared"]), file=out)
         rows = [["target", "compared", "agree", "disagree", "not compared", "agreement"]]
         for target, tt in breakdown(group, "target").items():
             pct = "n/a" if tt["agreement"] is None else f"{tt['agreement']:.2%}"
@@ -1420,10 +1563,10 @@ def report(cells: Sequence[Cell], versions: dict[str, str], seconds: float, out=
         for c in wrong:
             groups[cause(c)].append(c)
         for name, group in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-            inputs = sorted({c.input for c in group})
+            names = sorted({c.input for c in group})
             print(
-                f"\n- {name}: {len(group)} cells in {len(inputs)} inputs "
-                f"({', '.join(inputs[:6])}{', ...' if len(inputs) > 6 else ''})",
+                f"\n- {name}: {len(group)} cells in {len(names)} inputs "
+                f"({', '.join(names[:6])}{', ...' if len(names) > 6 else ''})",
                 file=out,
             )
             by_package = Counter(split_key(c.package)[0] for c in group)
@@ -1497,7 +1640,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"no target matches {args.target}")
     args.output = args.output.resolve()  # the referees run in the input's folder: no relative paths
     args.output.mkdir(parents=True, exist_ok=True)
-    check_workdir(args.output / "work")
     versions = tool_versions()
     print(f"{versions}; {len(inputs)} inputs on {len(targets)} targets", file=sys.stderr)
     start = datetime.datetime.now()

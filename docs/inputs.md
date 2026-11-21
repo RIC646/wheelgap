@@ -5,9 +5,9 @@ report, a `pyproject.toml`, a script with a `# /// script` block, directories, o
 With no input it reads the current directory.
 
 ```bash
-wheelgap                          # the lockfile in the current directory
+wheelgap                          # the current directory: its lockfile, or what it has instead
 wheelgap uv.lock                  # one file
-wheelgap services/api services/worker   # the lockfile in each directory
+wheelgap services/api services/worker   # the same for each directory
 wheelgap psycopg2 numpy==2.3.4    # package names, with or without a version
 ```
 
@@ -36,9 +36,61 @@ needs no index lookup (except when its `requires-python` leaves out a Python you
 A **directory** is searched for, in this order, `uv.lock`, `pylock.toml`, `poetry.lock`, `pdm.lock`,
 `Pipfile.lock`, `requirements.txt`, `requirements.lock` and `pixi.lock`, and the first one found is read.
 `--environment` makes a directory's `pixi.lock` the one read, and when a directory has `pixi.lock`
-next to another lockfile, a note on stderr names the `pixi.lock` it passed over. A directory with none of them is an
-error; if it has a `pyproject.toml` with a `[project]` table, the error suggests checking that file
-instead. wheelgap doesn't switch to `pyproject.toml` on its own.
+next to another lockfile, a note on stderr names the `pixi.lock` it passed over.
+
+In a directory with none of those names, wheelgap looks further (after 0.13.0; before, this was an error). Each step
+is tried only if the one before found nothing, a note on stderr says which file was checked and why (also with
+`--quiet`), and `--json` has it in [`directory_inputs`](output.md#json):
+
+1. **`pyproject.toml`** at the root, if it has a `[project]` table that lists dependencies or extras. It is checked as
+   [`wheelgap pyproject.toml`](#pyprojecttoml) checks it: the direct dependencies only, with the usual note that says
+   so and names `--deps`.
+2. **A requirements file under another name** at the root: `requirements*.txt` or `requirements*.in`, or a `.txt` or
+   `.in` file in `requirements/` (not a `.in` next to the `.txt` compiled from it, and not a name that starts, in
+   any case, with `constraint`, `readme`, `license`, `licence`, `copying`, `notice`, `changelog`, `changes`,
+   `history`, `authors`, `contributing`, `todo` or `notes`). If there
+   is exactly one, it is checked. If there are several, wheelgap doesn't choose: it exits 2 and lists each as a
+   command to run (`wheelgap requirements/base.txt`).
+3. **An input in a subfolder**, up to 3 folders down (`backend/requirements.txt`, `services/api/uv.lock`): for each
+   folder, the file `wheelgap FOLDER` would read (the first lockfile name above, else a `pyproject.toml` that lists
+   `[project]` dependencies). Hidden folders, `node_modules`, `site-packages`, `__pycache__` and virtualenvs aren't
+   searched, symlinks aren't followed, and the search opens at most 2000 folders. If there is exactly one, it is
+   checked as `wheelgap FOLDER` checks that folder (so a `requirements.txt` there with nothing to check gives way to
+   the folder's `pyproject.toml`), and the header, `--markdown` and `--json`'s `sources` name it by its path in the
+   directory (`scripts/requirements.txt`), since a bare `requirements.txt` would read as the root's. Several are
+   listed as commands (the first 10, then a count) with exit code 2. So is the one input when another requirements
+   file could as well be the project's: one under another name beside a subfolder's `requirements.txt`
+   (`docker/main/requirements-wheels.txt`), or a `requirements-dev.txt` at the root.
+
+wheelgap only checks a file on its own when it can take it for the project's dependencies. So these are listed as
+a command to run (exit 2) instead of being checked, even when there is only one:
+
+- a requirements file or a folder whose name says it is for development, tests, docs or examples: a name with
+  one of these words in it, set off by `-`, `_`, `.` or the name's ends: `dev`, `develop`, `development`, `test`,
+  `tests`, `testing`, `doc`, `docs`, `example`, `examples`, `sample`, `samples`, `demo`, `demos`, `bench`,
+  `benchmark`, `benchmarks`, `lint`, `ci`, `typing`, `fixtures`, `templates`; as in `requirements-dev.txt`,
+  `docs/requirements.txt` or `e2e_tests/uv.lock` (but not `devtools/`). Such folders are only looked at when no other subfolder has an
+  input;
+- the one input in a subfolder, when the root is a project itself: it has a `setup.py`, a `setup.cfg`, or a
+  `pyproject.toml` with a `[project]` table, a `[build-system]` table or Poetry dependencies. The project's own
+  dependencies are at the root, where wheelgap couldn't read any, not in the subfolder;
+- anything found by a search that didn't see every folder: it stopped at 2000 folders, or a folder couldn't be
+  read.
+
+A `pyproject.toml` with a `[project]` table that lists nothing is the answer (`No packages to check.`, exit 0) when
+step 2 finds no requirements file and step 3 no subfolder input, leaving aside those whose name says development,
+tests, docs or examples. A directory where nothing is found at all is an error that says what was looked for, and
+why its `pyproject.toml` couldn't be checked if it has one.
+
+**A file with nothing to check** (after 0.13.0): when the first lockfile found lists no package from an index (a
+`requirements.txt` that only says `.`, a `pixi.lock` with conda packages only, a `uv.lock` with only the project
+itself), wheelgap reads the next of the names above that has one, then the root's `pyproject.toml`, and a note says
+which file it passed over and why. If none has anything either, the first file is read as before. With
+`--environment`, the `pixi.lock` is read whatever it holds.
+
+The files a directory already had an answer from are read as before: the order of the names above hasn't changed, and
+a root file always comes before a subfolder's. The Python API's `check_lockfile()` and `wheelgap diff` have no notes
+to say which file they picked, so they still read a directory's lockfile by name only.
 
 A **file** is read by its name:
 
@@ -138,6 +190,32 @@ Default selections can go in [`[tool.wheelgap]`](configuration.md#extras) as `ex
 
 **Default targets:** wheelgap reads `[tool.uv] required-environments` from the project's `pyproject.toml` as default
 targets; see [Targets](targets.md#how-targets-are-chosen).
+
+**A lock limited by `[tool.uv] environments`** (after 0.13.0): with
+[`environments`](https://docs.astral.sh/uv/concepts/resolution/#limited-resolution-environments) set, uv locks for
+those environments only. The lock records them as `supported-markers`, leaves out the packages and wheels that only
+other environments need, and `uv sync` fails anywhere else ("The current Python platform is not compatible with the
+lockfile's supported environments"). wheelgap follows uv:
+
+- a target inside the environments is checked as always;
+- a target you asked for (`-t`, `[tool.wheelgap] targets`, `--dockerfile`, a `-p`) that is outside them is an error
+  (exit code 2, and the [error object](output.md#json) with `--json`) that names the targets the lock doesn't cover
+  and the ones it does, instead of a table of gaps that only say the lock left that platform out. `--online` doesn't
+  change this: it can look up the wheels again, but not the packages the lock left out;
+- the built-in default platforms are narrowed to the ones the lock covers, with a note on stderr, so
+  `wheelgap uv.lock` on a Linux-only lock checks `linux-x86_64` and `linux-aarch64`. A default platform the lock
+  covers for only some of the Pythons you asked for stays, and is the error above. `wheelgap diff` drops only the
+  platforms both locks leave out, so a platform one lock covers and the other doesn't (one the new lock gives up or
+  adds) is the error above too, and so is any platform when one side isn't a `uv.lock`;
+- an [`--advisory`](cli.md#advisory) target the lock leaves out isn't checked, with a note, since it never fails the
+  run.
+
+A target is inside when any of the markers holds for it. They are evaluated for the target's `sys_platform`,
+`platform_machine`, `os_name`, `platform_system`, `platform_python_implementation`, `implementation_name`,
+`python_version` and `python_full_version`. Where no marker holds for sure and one can't be decided for the target
+(`platform_release`, `platform_machine` on `win32`, a patch release such as `python_full_version >= '3.13.2'`),
+wheelgap says it can't tell and stops, also with exit code 2, rather than guess. To check a platform the lock doesn't
+cover, add it to `environments` and run `uv lock`.
 
 ## pylock.toml
 
@@ -309,6 +387,15 @@ and to every requirement, including those in `-r` and `-c` files: with `--no-bin
 (`source` if it has an sdist), and with `--only-binary` a package with no fitting wheel is `missing`, since pip won't
 build it. `--explain` says which option did it.
 
+The same two options written after a requirement (`albumentations>=0.3.2 --no-binary qudida,albumentations`, after
+0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line
+of its own, not only for that requirement. `--hash` and `--config-settings` after a requirement are accepted as
+before. Any other option there is an input error that names the file and line: pip itself ignores some (`--pre`,
+`--index-url`, `-r`) and refuses the rest, so put the option on its own line.
+
+An included file that can't be read (`-r FILE` or `-c FILE` naming a file that isn't there) is an input error that
+names the including file and line, `requirements.txt:3: -r base.txt: file not found`; pip stops there too.
+
 **Constraint files** (`-c FILE`, `-cFILE`, `--constraint FILE` or `--constraint=FILE`) restrict unpinned requirements
 without adding packages. Exact constraints select a version; ranges are intersected. A constraint wheelgap can't apply
 leaves the package `unknown` rather than guessed: one with an environment marker, a URL or path, or two different
@@ -460,12 +547,30 @@ For `pyproject.toml` inputs and PEP 723 scripts, wheelgap applies uv's `exclude-
 at or after the cutoff is left out, so a release is checked with only its earlier files, and a release with none of
 them is passed over. That holds for ranges, unpinned requirements and exact `==` pins alike, with and without
 `--deps`: a wheel added to a pinned release after the cutoff isn't counted, and a pinned release uploaded after it is
-unknown, since uv won't install it. `exclude-newer-package` gives each package it names its own cutoff, or none with
-`false`.
+unknown, since uv won't install it. `exclude-newer-package` gives each package it names its own cutoff (a
+timestamp, a date or a duration), or none with `false`.
 
 A cutoff is an RFC 3339 timestamp with an explicit offset (for example `"2025-01-01T00:00:00Z"`), or a `"YYYY-MM-DD"`
-date, which includes that whole day in the local time zone, as uv does. uv's relative durations (`"7 days"`, `"P7D"`)
-and any other value are input errors: the cutoff a duration gives moves with the clock.
+date, which includes that whole day in the local time zone, as uv does. It can also be a duration (after 0.13.0),
+uv's [dependency cooldown](https://docs.astral.sh/uv/concepts/resolution/#dependency-cooldowns): `"3 days"`,
+`"1 week"`, `"24 hours"`, `"P3D"`, `"PT24H"`. uv counts a duration back from the current time whenever it resolves,
+and wheelgap counts it back from the time of the run, so the answer is what `uv lock` would pick now and can change
+from one run to the next; a note on stderr gives the cutoff that was used (`-q` drops it).
+
+Durations are read exactly as uv reads them:
+
+- either jiff's "friendly" format (`3 days`, `1w 2d`, `2 hours, 30 minutes`, `1.5h`, `2d 12:30:00`, with unit names
+  from `weeks`/`wks`/`wk`/`w` down to `ns`) or an ISO 8601 duration (`P3D`, `P1W2D`, `PT36H`, `P1DT1.5H`);
+- a day is 24 hours and a week 7 days, in UTC, whatever the local time zone does;
+- a sign or `ago` changes nothing (`-3 days` and `3 days ago` are `3 days`), and `0 days` is the current time;
+- months and years are refused, as by uv, since they have no fixed length;
+- a file uploaded at the cutoff itself is left out, compared in whole milliseconds.
+
+`exclude-newer = false` means no cutoff. Any other value is an input error that names the file: a duration uv
+refuses (`"1 month"`, `"3 dayz"`, `"1.5 days"`), a date or timestamp written another way (`"20250101"`,
+`"2025-01-01T00:00:00"` without an offset), and uv's table form (`{ timestamp = ..., span = ... }`), which wheelgap
+doesn't read. uv itself warns about a value it can't read and then ignores the file's settings; wheelgap stops, since
+the project meant to set a cutoff.
 
 The settings are read from the script's own block, or for a `pyproject.toml` from its `[tool.uv]` table, or from a
 `uv.toml` beside it, which uv reads instead. For a uv workspace member, uv uses the workspace root's settings (its

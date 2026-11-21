@@ -462,6 +462,14 @@ starts on (counted from 1; the first `RUN` that installs the file, if several do
 the build context, with `/` on every OS (`reqs/base.txt`), as the Dockerfile's `COPY` names it; `sources` gives its
 name only. The key is absent without the flag.
 
+When an input is a directory (after 0.13.0), the top-level `directory_inputs` list says which of its files was read,
+one entry per directory: the `directory` as it was given, the `file` relative to it with `/` on every OS
+(`backend/requirements.txt`), the `reason` (`lockfile`: a lockfile or `requirements.txt` at the root, found by its
+name; `pyproject`: the root's `pyproject.toml`; `requirements`: the root's only requirements file under another name;
+`subfolder`: the only input below the root, which `sources` then names by the same relative path, as in
+`scripts/requirements.txt`, where every other input has its file name only) and `empty`, the files that come first in the search but had nothing to
+check, each with its `file` and `why` (`[]` in the usual case). The key is absent when no input was a directory. See
+[Which file is read](inputs.md#which-file-is-read).
 `dockerfile_notes` (after 0.13.0) lists what a `--dockerfile` answer leaves out, one object each: the `dockerfile`
 path as given, the `line` it is about (or `null`), a `kind` to match on and the `message` the note on stderr has.
 The kinds: `image-not-read` (`-p` and `-t` stood in for an [image wheelgap can't read](cli.md#dockerfile));
@@ -519,6 +527,11 @@ error object on stdout instead of results, next to the usual `wheelgap: error:` 
 ```json
 {"error": {"message": "nonexist.lock: no such file", "type": "SourceError"}}
 ```
+
+When a directory has several files to choose from (after 0.13.0; see
+[Which file is read](inputs.md#which-file-is-read)), the error's `type` is `DirectoryChoiceError` and it also has
+`candidates`: the paths of all of them, each one an input to pass instead of the directory. The message lists the
+first 10 as commands, one per line.
 
 Command-line usage errors from argparse are still plain text on stderr.
 

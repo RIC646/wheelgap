@@ -2373,6 +2373,8 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         for source in sources:
             if source.poetry_extras_unsure is not None:
                 print(f"wheelgap: note: {source.label}: {source.poetry_extras_unsure}", file=sys.stderr)
+            for note in source.ignored_options:  # pip's answer either way, so -q drops it
+                print(f"wheelgap: note: {note}", file=sys.stderr)
     for source in sources:
         # Always, like the note below: either may mean uv applies another upload cutoff than the one checked.
         if source.exclude_newer_unread is not None:

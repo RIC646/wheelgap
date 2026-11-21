@@ -263,6 +263,9 @@ class Source:
     deps_blockers: list[str] = field(default_factory=list)
     # A requirements file's --no-binary/--only-binary policy, applied to the resolved packages too.
     format_control: _FormatControl | None = None
+    # A requirements file's options that pip ignores after a requirement (`jax==0.4.25 -f URL`), for notes:
+    # `requirements.txt:2: pip ignores -f after a requirement`, once per file and option.
+    ignored_options: list[str] = field(default_factory=list)
     # --deps (deps.py): per target, the packages installed and the dependency path to each, keyed by index into
     # `packages`. check() uses it in place of a lockfile's graph.
     deps_paths: dict[Target, dict[int, list[str]]] | None = None
@@ -2140,6 +2143,7 @@ def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> S
     format_control = _FormatControl()
     req_lines: list[str] = []
     compiler_signs: list[str] = []
+    ignored_options: dict[tuple[Path, str], str] = {}
     pkgs: list[Package] = []
     for constraint_path in constraint_paths:
         # What it returns is the requirements of a -r inside the constraints file (pip's rule): keep them, as
@@ -2154,6 +2158,7 @@ def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> S
                 format_control=format_control,
                 req_lines=req_lines,
                 compiler_signs=compiler_signs,
+                ignored_options=ignored_options,
             )
         )
     pkgs.extend(
@@ -2165,9 +2170,12 @@ def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> S
             format_control=format_control,
             req_lines=req_lines,
             compiler_signs=compiler_signs,
+            ignored_options=ignored_options,
         )
     )
-    return _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
+    source = _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
+    source.ignored_options = list(ignored_options.values())
+    return source
 
 
 def _finalize_requirements(
@@ -2264,42 +2272,116 @@ def _include_error(path: Path, number: int | None, line: str, error: OSError, st
     return SourceError(f"{where}: {line}: {why}")
 
 
-# The options pip takes after a requirement that wheelgap reads there. pip 26.3 parses the rest of the line with
-# the parser it uses for option lines (break_args_options and build_parser in pip/_internal/req/req_file.py), but
-# hands a requirement only --hash and --config-settings; --no-binary and --only-binary still take effect, for the
-# whole install, because their parser callbacks change the install's format control as the line is parsed.
-_CONFIG_SETTINGS_OPTIONS = ("--config-settings", "--config-setting")
+# What pip 26.3 does with each option it reads after a requirement on the same line. It parses the rest of the line
+# with the parser it uses for option lines (break_args_options and build_parser in pip/_internal/req/req_file.py), so
+# an unknown option, an ambiguous abbreviation or a missing value is an error. handle_line then hands the requirement
+# only --hash and --config-settings, and never calls handle_option_line for the line, so the index, include and
+# finder options are dropped ("ignored"). Some still take effect, because their parser callback changes the install's
+# own settings as the line is parsed: --no-binary and --only-binary ("format", which wheelgap reads) and
+# --all-releases and --only-final ("release", which wheelgap doesn't), for the whole install. -e makes the line's
+# requirement an editable one, which pip refuses for a name. --use-feature turns the feature on for the run (its
+# parser list is shared), and no feature changes which file pip picks. Each entry: spellings, takes a value, kind.
+_REQUIREMENT_LINE_OPTIONS: tuple[tuple[tuple[str, ...], bool, str], ...] = (
+    (("-i", "--index-url", "--pypi-url"), True, "ignored"),
+    (("--extra-index-url",), True, "ignored"),
+    (("--no-index",), False, "ignored"),
+    (("-c", "--constraint"), True, "ignored"),
+    (("-r", "--requirement"), True, "ignored"),
+    (("-e", "--editable"), True, "editable"),
+    (("-f", "--find-links"), True, "ignored"),
+    (("--no-binary",), True, "format"),
+    (("--only-binary",), True, "format"),
+    (("--prefer-binary",), False, "ignored"),
+    (("--require-hashes",), False, "ignored"),
+    (("--no-require-hashes",), False, "ignored"),
+    (("--pre",), False, "ignored"),
+    (("--all-releases",), True, "release"),
+    (("--only-final",), True, "release"),
+    (("--trusted-host",), True, "ignored"),
+    (("--use-feature",), True, "feature"),
+    (("--hash",), True, "hash"),
+    (("-C", "--config-settings"), True, "requirement"),
+)
+_USE_FEATURE_CHOICES = (
+    "fast-deps",
+    "inprocess-build-deps",
+    "venv-isolation",
+    "truststore",
+    "no-binary-enable-wheel-cache",
+    "build-constraint",
+)
+_LONG_LINE_OPTIONS = {name: entry for entry in _REQUIREMENT_LINE_OPTIONS for name in entry[0] if name.startswith("--")}
+_SHORT_LINE_OPTIONS = {name: entry for entry in _REQUIREMENT_LINE_OPTIONS for name in entry[0] if len(name) == 2}
 
 
-def _requirement_options(text: str, where: str) -> tuple[bool, bool]:
-    """Checks the options after a requirement (`name>=1 --no-binary name`). Returns whether there's a --hash, and
-    whether there's a --no-binary or --only-binary for _apply_format_options. SourceError for any other option:
-    pip takes some (and ignores them: --pre, --index-url, -r) and refuses the rest, and wheelgap reads neither."""
+def _requirement_options(text: str, where: str) -> tuple[bool, bool, list[tuple[str, str]]]:
+    """Reads the options after a requirement (`name>=1 --no-binary name`) as pip's optparse reads them: long options
+    by any unambiguous prefix, `--opt=value`, `-fVALUE`. Returns whether there's a --hash, whether there's a
+    --no-binary or --only-binary for _apply_format_options, and what pip ignores there, for a note: each option as
+    (the name it was written with, its long name), and words that aren't options, which optparse sets aside, as one
+    entry. SourceError where pip refuses
+    the line, or where it applies an option that wheelgap doesn't read."""
     try:
         tokens = shlex.split(text)
     except ValueError:
         raise SourceError(f"{where}: pip can't split this line (an unclosed quote?): {text}") from None
+    refused = f"{where}: pip refuses this line:"
     hashed = formats = False
+    ignored: list[tuple[str, str]] = []
     k = 0
     while k < len(tokens):
         token = tokens[k]
-        option, eq, _ = token.partition("=")
-        if token.startswith("-C") and not token.startswith("--"):
-            attached = len(token) > 2
-        elif option == "--hash" or option in _CONFIG_SETTINGS_OPTIONS or _format_option(token):
-            attached = bool(eq)
-        else:
-            raise SourceError(
-                f"{where}: wheelgap doesn't read {token} after a requirement, only --hash, --no-binary, "
-                "--only-binary and --config-settings (pip ignores some other options there and refuses the "
-                "rest); put it on a line of its own"
+        k += 1
+        if token == "--" or not token.startswith("-") or token == "-":
+            # optparse sets these words aside (and every word after --), and pip drops them
+            if token != "--" or k < len(tokens):
+                ignored.append(("words that aren't options", ""))
+            if token == "--":
+                break
+            continue
+        value: str | None
+        if token.startswith("--"):
+            option, eq, given = token.partition("=")
+            matches = (
+                [option] if option in _LONG_LINE_OPTIONS else [n for n in _LONG_LINE_OPTIONS if n.startswith(option)]
             )
-        if not attached and k + 1 >= len(tokens):
-            raise SourceError(f"{where}: {token} needs a value, as in pip")
-        hashed = hashed or option == "--hash"
-        formats = formats or _format_option(token) is not None
-        k += 1 if attached else 2
-    return hashed, formats
+            if not matches:
+                raise SourceError(f"{refused} no such option: {option}")
+            if len(matches) > 1:
+                raise SourceError(f"{refused} ambiguous option: {option} ({', '.join(sorted(matches))}?)")
+            name = matches[0]
+            names, takes_value, kind = _LONG_LINE_OPTIONS[name]
+            value = given if eq else None
+            if value is not None and not takes_value:
+                raise SourceError(f"{refused} {name} option does not take a value")
+        else:
+            name = token[:2]
+            if name not in _SHORT_LINE_OPTIONS:
+                raise SourceError(f"{refused} no such option: {name}")
+            names, takes_value, kind = _SHORT_LINE_OPTIONS[name]
+            value = token[2:] or None  # every short option pip reads here takes a value: -fURL
+        if takes_value and value is None:
+            if k >= len(tokens):
+                raise SourceError(f"{refused} {name} option requires 1 argument")
+            value = tokens[k]  # optparse takes the next word, even one that starts with "-"
+            k += 1
+        if kind == "feature" and value not in _USE_FEATURE_CHOICES:
+            raise SourceError(f"{refused} option --use-feature: invalid choice: {value!r}")
+        if kind == "editable":
+            raise SourceError(
+                f"{where}: pip reads {name} after a requirement as making that requirement editable, and refuses it "
+                'for a name ("is not a valid editable requirement"); put the editable on a line of its own'
+            )
+        if kind == "release":
+            raise SourceError(
+                f"{where}: pip applies {name} after a requirement to the whole install, and it can change which "
+                "release pip picks; wheelgap doesn't read it"
+            )
+        if kind == "ignored":
+            ignored.append((name, names[-1]))  # -f and --find-links are one option
+        hashed = hashed or kind == "hash"
+        formats = formats or kind == "format"
+    return hashed, formats, ignored
 
 
 def _read_requirements(
@@ -2313,13 +2395,15 @@ def _read_requirements(
     compiler_signs: list[str] | None = None,
     stack: list[Path] | None = None,
     raw_lines: list[str] | None = None,
+    ignored_options: dict[tuple[Path, str], str] | None = None,
 ) -> list[Package]:
     """`index_options` collects the lines that may point pip at another index: index options (--index-url,
     --extra-index-url, --find-links, --no-index), includes that aren't read, and abbreviated include options.
     `req_lines` collects requirement lines that aren't constraints, for --deps; `compiler_signs` notes the
     `--hash` options and `# via` comments that mark pip-compile output, in requirement files only.
     `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it: by the path each
-    file was named with.
+    file was named with. `ignored_options` collects the options pip ignores after a requirement, once per file and
+    option, keyed by (resolved file, option), each a `path:line: ...` note.
 
     A file is read through the folder it was named in (`os.path.abspath`, no symlink resolution), as pip
     reads it, so an include in a symlinked file resolves against the link's folder, not the target's.
@@ -2399,6 +2483,7 @@ def _read_requirements(
                             req_lines,
                             compiler_signs,
                             stack=stack,
+                            ignored_options=ignored_options,
                         )
                     except OSError as e:  # the constraints file itself: one it includes is a SourceError by now
                         raise _include_error(path, number, line, e, stack) from e
@@ -2421,6 +2506,7 @@ def _read_requirements(
                         req_lines,
                         compiler_signs,
                         stack,
+                        ignored_options=ignored_options,
                     )
                 except OSError as e:  # the included file itself: one it includes is a SourceError by now
                     raise _include_error(path, number, line, e, stack) from e
@@ -2444,7 +2530,11 @@ def _read_requirements(
             hashed = False
             if options:
                 where = _shown(path, stack) + (f":{number}" if number is not None else "")
-                hashed, formats = _requirement_options(options, where)
+                hashed, formats, ignored = _requirement_options(options, where)
+                if ignored_options is not None:
+                    for shown, option in ignored:
+                        note = f"{where}: pip ignores {shown} after a requirement"
+                        ignored_options.setdefault((resolved, option), note)
                 if formats and format_control is not None:
                     # Each time the line is read, as for an option line: pip reads a file included twice twice,
                     # and the later option wins.
@@ -3090,6 +3180,7 @@ def parse_conda_env(path: Path) -> Source:
     format_control = _FormatControl()
     req_lines: list[str] = []
     compiler_signs: list[str] = []
+    ignored_options: dict[tuple[Path, str], str] = {}
     pkgs = _read_requirements(
         path,
         seen,
@@ -3099,9 +3190,12 @@ def parse_conda_env(path: Path) -> Source:
         req_lines=req_lines,
         compiler_signs=compiler_signs,
         raw_lines=pip_lines,
+        ignored_options=ignored_options,
     )
     pkgs.extend(conda_skips)
-    return _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
+    source = _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
+    source.ignored_options = list(ignored_options.values())
+    return source
 
 
 READERS = {

@@ -46,14 +46,21 @@ is tried only if the one before found nothing, a note on stderr says which file 
    [`wheelgap pyproject.toml`](#pyprojecttoml) checks it: the direct dependencies only, with the usual note that says
    so and names `--deps`.
 2. **A requirements file under another name** at the root: `requirements*.txt` or `requirements*.in`, or a `.txt` or
-   `.in` file in `requirements/` (not `constraints*`, and not a `.in` next to the `.txt` compiled from it). If there
+   `.in` file in `requirements/` (not a `.in` next to the `.txt` compiled from it, and not a name that starts, in
+   any case, with `constraint`, `readme`, `license`, `licence`, `copying`, `notice`, `changelog`, `changes`,
+   `history`, `authors`, `contributing`, `todo` or `notes`). If there
    is exactly one, it is checked. If there are several, wheelgap doesn't choose: it exits 2 and lists each as a
    command to run (`wheelgap requirements/base.txt`).
 3. **An input in a subfolder**, up to 3 folders down (`backend/requirements.txt`, `services/api/uv.lock`): for each
    folder, the file `wheelgap FOLDER` would read (the first lockfile name above, else a `pyproject.toml` that lists
    `[project]` dependencies). Hidden folders, `node_modules`, `site-packages`, `__pycache__` and virtualenvs aren't
    searched, symlinks aren't followed, and the search opens at most 2000 folders. If there is exactly one, it is
-   checked; several are listed as commands (the first 10, then a count) with exit code 2.
+   checked as `wheelgap FOLDER` checks that folder (so a `requirements.txt` there with nothing to check gives way to
+   the folder's `pyproject.toml`), and the header, `--markdown` and `--json`'s `sources` name it by its path in the
+   directory (`scripts/requirements.txt`), since a bare `requirements.txt` would read as the root's. Several are
+   listed as commands (the first 10, then a count) with exit code 2. So is the one input when another requirements
+   file could as well be the project's: one under another name beside a subfolder's `requirements.txt`
+   (`docker/main/requirements-wheels.txt`), or a `requirements-dev.txt` at the root.
 
 wheelgap only checks a file on its own when it can take it for the project's dependencies. So these are listed as
 a command to run (exit 2) instead of being checked, even when there is only one:
@@ -67,7 +74,8 @@ a command to run (exit 2) instead of being checked, even when there is only one:
 - the one input in a subfolder, when the root is a project itself: it has a `setup.py`, a `setup.cfg`, or a
   `pyproject.toml` with a `[project]` table, a `[build-system]` table or Poetry dependencies. The project's own
   dependencies are at the root, where wheelgap couldn't read any, not in the subfolder;
-- anything found by a search that stopped at 2000 folders.
+- anything found by a search that didn't see every folder: it stopped at 2000 folders, or a folder couldn't be
+  read.
 
 A `pyproject.toml` with a `[project]` table that lists nothing is the answer (`No packages to check.`, exit 0) when
 step 2 finds no requirements file and step 3 no subfolder input, leaving aside those whose name says development,

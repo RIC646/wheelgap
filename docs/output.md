@@ -466,7 +466,8 @@ When an input is a directory (after 0.13.0), the top-level `directory_inputs` li
 one entry per directory: the `directory` as it was given, the `file` relative to it with `/` on every OS
 (`backend/requirements.txt`), the `reason` (`lockfile`: a lockfile or `requirements.txt` at the root, found by its
 name; `pyproject`: the root's `pyproject.toml`; `requirements`: the root's only requirements file under another name;
-`subfolder`: the only input below the root) and `empty`, the files that come first in the search but had nothing to
+`subfolder`: the only input below the root, which `sources` then names by the same relative path, as in
+`scripts/requirements.txt`, where every other input has its file name only) and `empty`, the files that come first in the search but had nothing to
 check, each with its `file` and `why` (`[]` in the usual case). The key is absent when no input was a directory. See
 [Which file is read](inputs.md#which-file-is-read).
 

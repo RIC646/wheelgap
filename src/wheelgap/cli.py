@@ -1461,11 +1461,16 @@ def split_ignore_value(value: str, how: str, docker_musl: bool) -> list[tuple[st
 
 def directory_notes(found: DirectoryInput) -> list[str]:
     """What to say when a directory's input isn't simply its first lockfile: which file was read, and why."""
-    notes = [f"{path} has {why}" for path, why in found.empty]
-    if found.reason == "lockfile" and not found.empty:
-        return []
+    passed = "; ".join(f"{path} has {why}" for path, why in found.empty)
+    instead = [f"{passed}, so {found.path} was checked instead"] if found.empty else []
+    if found.reason == "subfolder":
+        return [
+            f"no lockfile, requirements.txt or pyproject.toml dependencies at the root of {found.directory}, so the "
+            f"only input in its subfolders, {found.path.parent if found.empty else found.path}, was checked",
+            *instead,
+        ]
     if found.empty:
-        return [f"{'; '.join(notes)}, so {found.path} was checked instead"]
+        return instead
     if found.reason == "pyproject":
         return [f"no lockfile or requirements.txt in {found.directory}, so {found.path} was checked"]
     if found.reason == "requirements":
@@ -1473,10 +1478,7 @@ def directory_notes(found: DirectoryInput) -> list[str]:
             f"no lockfile, requirements.txt or pyproject.toml dependencies in {found.directory}, so its only "
             f"requirements file, {found.path}, was checked"
         ]
-    return [
-        f"no lockfile, requirements.txt or pyproject.toml dependencies at the root of {found.directory}, so the "
-        f"only input in its subfolders, {found.path}, was checked"
-    ]
+    return []
 
 
 def directory_inputs_json(sources: list[Source]) -> list[dict[str, object]]:

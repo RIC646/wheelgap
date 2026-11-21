@@ -201,6 +201,109 @@ def test_the_only_input_in_a_subfolder_is_checked(capsys, fake_pypi, tmp_path, f
     )
 
 
+def test_a_subfolder_input_is_named_by_its_path_in_the_directory(capsys, fake_pypi, tmp_path):
+    # stderr is lost in a job summary, and a bare requirements.txt would read as the root's.
+    write(tmp_path, {"scripts/tools/requirements.txt": "nowheels==0.9\npurewheel\n"})
+    code, out, err = run(capsys, tmp_path, *ARGS, "--json")
+    assert code == 1 and json.loads(out)["sources"] == ["scripts/tools/requirements.txt"]
+    assert "scripts/tools/requirements.txt has 1 unpinned package" in err
+    _, out, _ = run(capsys, tmp_path, *ARGS, "--color", "never")
+    assert " · scripts/tools/requirements.txt · 2 packages · " in out.splitlines()[0]
+    _, out, _ = run(capsys, tmp_path, *ARGS, "--markdown")
+    assert "scripts/tools/requirements.txt" in out
+    # Named as a file, it is labelled as it always was.
+    _, out, _ = run(capsys, tmp_path / "scripts" / "tools" / "requirements.txt", *ARGS, "--json")
+    assert json.loads(out)["sources"] == ["requirements.txt"]
+
+
+@pytest.mark.parametrize(
+    ("rival", "listed"),
+    [
+        ("docker/main/requirements-wheels.txt", True),  # beside the subfolder's requirements.txt
+        ("docker/main/requirements/gpu.txt", True),
+        ("requirements-dev.txt", True),  # at the root: dev by its name, so not read on its own, but a rival
+        ("docker/main/requirements-dev.txt", False),  # not the project's by its name
+        ("docker/main/constraints.txt", False),
+        ("docker/other/requirements-wheels.txt", False),  # another folder's
+    ],
+)
+def test_a_subfolder_requirements_file_with_a_rival_is_listed_not_picked(capsys, fake_pypi, tmp_path, rival, listed):
+    write(tmp_path, {"docker/main/requirements.txt": "purewheel==3.1\n", rival: "nowheels==0.9\n"})
+    code, out, err = run(capsys, tmp_path, *ARGS, "--json")
+    if not listed:
+        assert code == 0 and json.loads(out)["sources"] == ["docker/main/requirements.txt"]
+        return
+    assert code == 2 and not fake_pypi
+    assert err.splitlines() == [
+        f"wheelgap: error: no lockfile, requirements.txt or pyproject.toml dependencies at the root of {tmp_path}, "
+        "and more than one file that could hold the project's dependencies. Check one:",
+        f"  {command(tmp_path / 'docker' / 'main' / 'requirements.txt')}",
+        f"  {command(tmp_path / rival)}",
+    ]
+    assert json.loads(out)["error"]["candidates"] == [
+        str(tmp_path / "docker" / "main" / "requirements.txt"),
+        str(tmp_path / rival),
+    ]
+
+
+def test_a_subfolder_is_read_as_wheelgap_reads_that_folder(capsys, fake_pypi, tmp_path):
+    # backend/requirements.txt has nothing to check, so `wheelgap backend` goes on to backend/pyproject.toml.
+    write(tmp_path, {"backend/requirements.txt": "-e .\n", "backend/pyproject.toml": PROJECT})
+    code, out, err = run(capsys, tmp_path, *ARGS, "--json")
+    by_folder = run(capsys, tmp_path / "backend", *ARGS, "--json")
+    report = json.loads(out)
+    assert code == by_folder[0] == 1 and report["packages"] == json.loads(by_folder[1])["packages"]
+    assert report["sources"] == ["backend/pyproject.toml"]
+    assert report["directory_inputs"] == [
+        {
+            "directory": str(tmp_path),
+            "file": "backend/pyproject.toml",
+            "reason": "subfolder",
+            "empty": [{"file": "backend/requirements.txt", "why": "only skipped entries (editable)"}],
+        }
+    ]
+    assert notes(err)[:2] == [
+        f"no lockfile, requirements.txt or pyproject.toml dependencies at the root of {tmp_path}, so the only "
+        f"input in its subfolders, {tmp_path / 'backend'}, was checked",
+        f"{tmp_path / 'backend' / 'requirements.txt'} has only skipped entries (editable), so "
+        f"{tmp_path / 'backend' / 'pyproject.toml'} was checked instead",
+    ]
+
+
+def test_a_subfolder_that_cant_be_read_means_nothing_is_picked(capsys, fake_pypi, tmp_path):
+    write(tmp_path, {"backend/requirements.txt": "nowheels==0.9\n", "private/requirements.txt": "fastlib\n"})
+    private = tmp_path / "private"
+    private.chmod(0)
+    try:
+        if os.access(private, os.R_OK):
+            pytest.skip("this user (or this OS) reads a folder whatever its mode")
+        code, _, err = run(capsys, tmp_path, *ARGS)
+    finally:
+        private.chmod(0o755)
+    assert code == 2 and not fake_pypi
+    assert err.splitlines() == [
+        f"wheelgap: error: no lockfile, requirements.txt or pyproject.toml dependencies at the root of {tmp_path}, "
+        f"but inputs in its subfolders ({private} couldn't be read). Check one:",
+        f"  {command(tmp_path / 'backend' / 'requirements.txt')}",
+    ]
+
+
+@pytest.mark.parametrize("name", ["requirements-gpu.txt", "backend/requirements.txt"])
+def test_a_picked_file_that_isnt_utf8_is_named_in_the_error(capsys, fake_pypi, tmp_path, name):
+    (tmp_path / name).parent.mkdir(exist_ok=True)
+    (tmp_path / name).write_bytes("purewheel==3.1  # caf\u00e9\n".encode("latin-1"))
+    code, _, err = run(capsys, tmp_path, *ARGS)
+    assert code == 2
+    assert err.startswith(f"wheelgap: error: {tmp_path / name}: not UTF-8 text (")
+
+
+@pytest.mark.parametrize("name", ["README.txt", "readme-first.txt", "LICENSE.txt", "constraints-3.13.txt", "NOTES.in"])
+def test_text_files_in_requirements_that_arent_requirements_files(capsys, fake_pypi, tmp_path, name):
+    write(tmp_path, {"requirements/base.txt": "nowheels==0.9\n", f"requirements/{name}": "How to install\n"})
+    code, out, _ = run(capsys, tmp_path, *ARGS, "--json")
+    assert code == 1 and json.loads(out)["directory_inputs"][0]["file"] == "requirements/base.txt"
+
+
 def test_several_subfolder_inputs_are_listed_one_per_folder(capsys, fake_pypi, tmp_path, fixtures):
     write(
         tmp_path,

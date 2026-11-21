@@ -10,7 +10,7 @@
         "version": {"type": "string", "description": "The wheelgap version that produced this report."},
         "sources": {
             "type": "array",
-            "description": "Labels of the inputs that were checked (lockfiles, requirements files, or package names).",
+            "description": "Labels of the inputs that were checked (lockfiles, requirements files, or package names): a file's name, or for the one input found in a directory's subfolder (after 0.13.0) its path in that directory, with / separators.",
             "items": {"type": "string"}
         },
         "dockerfile_inputs": {

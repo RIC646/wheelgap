@@ -44,7 +44,13 @@ is tried only if the one before found nothing, a note on stderr says which file 
 
 1. **`pyproject.toml`** at the root, if it has a `[project]` table that lists dependencies or extras. It is checked as
    [`wheelgap pyproject.toml`](#pyprojecttoml) checks it: the direct dependencies only, with the usual note that says
-   so and names `--deps`.
+   so and names `--deps`. It comes first even when the root also has requirements files under other names (step 2,
+   and `requirements*.lock`): wheelgap can't tell from a file whether it pins what the project installs or only its
+   build tools or docs (flask's `requirements/build.txt`). The note names them instead, after 0.13.0, as commands to
+   run (the first 3, then a count). One that looks like `pip-compile`, `uv pip compile` or `uv export` output is
+   named first: `requirements-lock.txt looks compiled and pinned: wheelgap DIR/requirements-lock.txt checks what it
+   pins`. It looks so when it has their mark (their header, `# via` comments or `--hash` options) and every package
+   it lists from an index is pinned with `==` or `===`. `--json` lists the same files in `directory_inputs`.
 2. **A requirements file under another name** at the root: `requirements*.txt` or `requirements*.in`, or a `.txt` or
    `.in` file in `requirements/` (not a `.in` next to the `.txt` compiled from it, and not a name that starts, in
    any case, with `constraint`, `readme`, `license`, `licence`, `copying`, `notice`, `changelog`, `changes`,

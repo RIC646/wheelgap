@@ -85,6 +85,7 @@ from .sources import (
     Source,
     SourceError,
     UvSelection,
+    _command,
     check_report_targets,
     load_inputs,
     parse_dist,
@@ -1662,7 +1663,25 @@ def directory_notes(found: DirectoryInput) -> list[str]:
     if found.empty:
         return instead
     if found.reason == "pyproject":
-        return [f"no lockfile or requirements.txt in {found.directory}, so {found.path} was checked"]
+        lines = [
+            f"no lockfile and no file named requirements.txt in {found.directory}, so {found.path}'s direct "
+            "dependencies were checked"
+        ]
+        # The other requirements files there, as commands: the first 3 (those that look compiled first), then a count.
+        named, more = found.other_requirements[:3], len(found.other_requirements) - 3
+        for path, compiled in named:
+            if compiled:
+                lines.append(
+                    f"{path.relative_to(found.directory).as_posix()} looks compiled and pinned: "
+                    f"`{_command(path)}` checks what it pins"
+                )
+        rest = [f"`{_command(path)}`" for path, compiled in named if not compiled]
+        if more > 0:
+            rest.append(f"{more} more")
+        if rest:
+            listed = rest[0] if len(rest) == 1 else ", ".join(rest[:-1]) + f" and {rest[-1]}"
+            lines.append(f"other requirements files there: {listed}")
+        return lines
     if found.reason == "requirements":
         return [
             f"no lockfile, requirements.txt or pyproject.toml dependencies in {found.directory}, so its only "
@@ -1683,6 +1702,9 @@ def directory_inputs_json(sources: list[Source]) -> list[dict[str, object]]:
             "file": relative(found, found.path),
             "reason": found.reason,
             "empty": [{"file": relative(found, path), "why": why} for path, why in found.empty],
+            "other_requirements": [
+                {"file": relative(found, path), "compiled": compiled} for path, compiled in found.other_requirements
+            ],
         }
         for source in sources
         if (found := source.found) is not None

@@ -100,7 +100,7 @@
             "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["directory", "file", "reason", "empty"],
+                "required": ["directory", "file", "reason", "empty", "other_requirements"],
                 "properties": {
                     "directory": {"type": "string", "description": "The directory as given."},
                     "file": {
@@ -121,6 +121,22 @@
                             "properties": {
                                 "file": {"type": "string", "description": "Relative to the directory."},
                                 "why": {"type": "string", "description": "What the file holds instead."}
+                            }
+                        }
+                    },
+                    "other_requirements": {
+                        "type": "array",
+                        "description": "With reason pyproject: the root's requirements files under other names, which weren't read, those that look compiled and pinned first. Empty for the other reasons.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["file", "compiled"],
+                            "properties": {
+                                "file": {"type": "string", "description": "Relative to the directory, with / separators."},
+                                "compiled": {
+                                    "type": "boolean",
+                                    "description": "Whether it looks like a compiler's full pin list (pip-compile, uv pip compile, uv export). A hint only: such a file may as well pin the build tools or the docs, so it is never read in pyproject.toml's place."
+                                }
                             }
                         }
                     }

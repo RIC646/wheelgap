@@ -468,7 +468,10 @@ one entry per directory: the `directory` as it was given, the `file` relative to
 name; `pyproject`: the root's `pyproject.toml`; `requirements`: the root's only requirements file under another name;
 `subfolder`: the only input below the root, which `sources` then names by the same relative path, as in
 `scripts/requirements.txt`, where every other input has its file name only) and `empty`, the files that come first in the search but had nothing to
-check, each with its `file` and `why` (`[]` in the usual case). The key is absent when no input was a directory. See
+check, each with its `file` and `why` (`[]` in the usual case), and `other_requirements`: with the reason
+`pyproject`, the root's requirements files under other names, which weren't read, each with its `file` and
+`compiled`, whether it looks like `pip-compile`, `uv pip compile` or `uv export` output that pins everything (a hint
+for which to check next, never used to choose; those come first), and `[]` otherwise. The key is absent when no input was a directory. See
 [Which file is read](inputs.md#which-file-is-read).
 `dockerfile_notes` (after 0.13.0) lists what a `--dockerfile` answer leaves out, one object each: the `dockerfile`
 path as given, the `line` it is about (or `null`), a `kind` to match on and the `message` the note on stderr has.

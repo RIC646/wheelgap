@@ -470,8 +470,12 @@ def test_mcp_check_lockfile_uses_the_same_search(fake_pypi, tmp_path):
     write(tmp_path, {"api/requirements.txt": "fastlib\n"})
     (_, reply) = run_mcp(init(), call("check_lockfile", **args))
     assert reply["result"]["isError"] is True
-    text = reply["result"]["content"][0]["text"]
-    assert command(tmp_path / "api" / "requirements.txt") in text and "Check one" in text
+    assert reply["result"]["content"][0]["text"].splitlines() == [
+        f"no lockfile, requirements.txt or pyproject.toml dependencies at the root of {tmp_path}, but inputs in its "
+        "subfolders. Check one:",
+        f"  {command(tmp_path / 'api' / 'requirements.txt')}",
+        f"  {command(tmp_path / 'backend' / 'requirements.txt')}",
+    ]
 
 
 def test_python_api_and_load_inputs(fake_pypi, tmp_path):

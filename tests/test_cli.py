@@ -2553,8 +2553,8 @@ def _assert_matches_output_schema(data):
     # complete: only with --dockerfile-inputs, and false exactly when dockerfile_warnings lists a line.
     assert set(summary) - {"complete"} == {"packages", "with_gaps", "per_target"}
     assert ("complete" in summary) == ("dockerfile_warnings" in data)
-    if "complete" in summary:
-        assert summary["complete"] is not bool(data["dockerfile_warnings"])
+    if "complete" in summary and data["dockerfile_warnings"]:
+        assert summary["complete"] is False  # also false when -p/-t stood in for an unread image
     distinct_names = {pkg["name"] for pkg in data["packages"]}
     assert len(distinct_names) <= summary["packages"] <= len(data["packages"])
     assert isinstance(summary["with_gaps"], int) and 0 <= summary["with_gaps"] <= summary["packages"]

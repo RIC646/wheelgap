@@ -1793,6 +1793,43 @@ _GIT_WRITES = frozenset(
 # /usr/bin/python3, a Python an earlier line installed) are another Python.
 _IMAGE_PYTHON_DIRS = frozenset({"/usr/local/bin"})
 _VERSIONED_RE = re.compile(r"(?:pip|python)(\d+\.\d+)", re.ASCII)
+# An installer run from inside another program's arguments: `node -e "…execSync('pip install x')"`, `ruby -e`,
+# `sed 'e pip install x'`, `git -c alias.x='!pip install x' x`, `tar --checkpoint-action=exec=…`.
+_HIDDEN_INSTALL_RE = re.compile(
+    r"(?<![\w.-])(?:pip[0-9.]*\s+(?:install|download|wheel)|uv\s+(?:pip|sync|tool|add|run))\b|-m\s*pip\b|"
+    r"(?<![\w.-])(?:poetry|pdm|pipenv|conda|mamba|micromamba|pipx|easy_install)\s+(?:install|add|sync|create)\b"
+)
+# A file in a bin folder that is a Python, a pip or uv, and files Python reads at start-up.
+_PYTHON_FILE_RE = re.compile(r"(?:python|pip|uv|uvx)[0-9.]*(?:-config)?|.*\.pth|(?:site|user)customize\.py", re.ASCII)
+# Read-only probes: they don't install, so they don't need to be the image's Python.
+_PIP_PROBES = ("--version", "-V", "list", "freeze", "show", "check", "help", "debug")
+_PYTHON_PROBES = ("--version", "-V", "-VV")
+
+
+def _over_python(path: str, venvs: Mapping[str, object]) -> bool:
+    """Whether a path a RUN writes (absolute, normalised) may replace the Python or pip a later install runs: a
+    Python, pip or uv in a bin folder (or the bin folder itself), anything under a Python's lib folder (its pip,
+    its site-packages, a .pth file), or anything in a venv."""
+    return (
+        (posixpath.dirname(path) in _BIN_DIRS and _PYTHON_FILE_RE.fullmatch(posixpath.basename(path)) is not None)
+        or path in _BIN_DIRS
+        or re.search(r"/lib/python3[0-9.]*(?:/|$)", path) is not None
+        or any(path == venv or path.startswith(venv + "/") for venv in venvs)
+    )
+
+
+def _image_name(image: str) -> str:
+    """The repository of an image reference, without its tag or digest."""
+    image = image.split("@", 1)[0]
+    return image.rpartition(":")[0] if ":" in image.rsplit("/", 1)[-1] else image
+
+
+def _expand_known(text: str, env: Mapping[str, str]) -> str:
+    """`text` with $NAME and ${NAME} replaced where `env` knows NAME, as BuildKit expands an ENV value with the
+    values before it; the rest (an unknown name, a modifier, $PATH when PATH isn't known) is left as written."""
+    return _VAR_REF_RE.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), text)
+
+
 _SHELL_RE = re.compile(
     r'\[\s*"(?:/bin/|/usr/bin/)?(?:sh|bash|dash|ash)"\s*,(?:\s*"(?:-[euxo]+|pipefail)"\s*,)*\s*"-[euxo]*c"\s*\]'
 )
@@ -2038,8 +2075,13 @@ class _RunReader:
                 while wrapper == "env" and words and words[0].assigns:
                     assigns.append((words[0].assigns, _Word(words[0].text.partition("=")[2], words[0].exact)))
                     words = words[1:]
-                if wrapper in ("sudo", "env") and words and words[0].text.startswith("-"):
-                    words = [_Word(f"{wrapper} {words[0].text}", exact=False)]
+                if wrapper == "nice" and words and re.fullmatch(r"-n|--adjustment", words[0].text):
+                    words = words[2:]  # `nice -n 10 CMD`
+                elif wrapper == "nice" and words and re.fullmatch(r"-\d+|-n-?\d+|--adjustment=-?\d+", words[0].text):
+                    words = words[1:]
+                if wrapper in ("sudo", "env", "nice") and words and words[0].text.startswith("-"):
+                    rest = " ".join(word.text for word in words)
+                    words = [_Word(f"{wrapper} {rest}", exact=False)]
             if words and words[0].exact and words[0].text in ("export", "declare", "typeset", "readonly", "local"):
                 assigns += [(w.assigns, _Word(w.text.partition("=")[2], w.exact)) for w in words[1:] if w.assigns]
                 if unknown := next((w for w in words[1:] if not w.exact), None):
@@ -2052,6 +2094,9 @@ class _RunReader:
                     self.path = self._path_entry(value.text, f"line {number}")
             if first in ("exit", "return") and not command.nested and not command.subshell:
                 exited = first
+            if first == "hash" and any(word.text.startswith("-p") for word in words[1:]):
+                # bash's `hash -p FILE NAME` makes NAME run FILE, whatever the PATH says.
+                self.path = "unknown", f"line {number} sets where a command is found with `hash -p`"
             kind, detail = self._classify(number, words, cwd, uv_system, stop) if words else ("shell", "")
             if kind in ("install", "installer-tools", "pip"):
                 names_installer = True
@@ -2108,6 +2153,9 @@ class _RunReader:
             # What this command may write to. A command that only reads can't change the files it names.
             written = [target.text for operator, target in command.redirects if ">" in operator]
             anywhere = False
+            if first in ("update-alternatives", "alternatives") and kind == "system-packages":
+                # `--install LINK NAME PATH PRIORITY`: the link it makes may be the Python the install runs.
+                written += [word.text for word in words[1:] if word.text.startswith("/")]
             if kind not in ("install", "pip", "system-packages") and first not in _UNCHANGING_COMMANDS:
                 written += [word.text for word in words[1:]]
                 if words and (folder := self._writes_folder(words)):
@@ -2116,8 +2164,16 @@ class _RunReader:
             self.mentions += [(number, text, cwd) for text in written]
             if first in ("mkdir", "touch", "ln", "install"):
                 self.created += [(number, word.text, cwd) for word in words[1:] if not word.text.startswith("-")]
+            sources_only = (
+                [word.text for word in words[1:-1]] if first in ("cp", "mv", "ln", "install", "rsync") else []
+            )
             for text in (written[:-1] if anywhere else written) if kind not in ("install", "pip", "venv") else ():
                 folder = posixpath.normpath(posixpath.join(cwd or "/", text)) if text.startswith("/") or cwd else ""
+                # cp, mv, ln, install and rsync write their last argument (or into it); the others what they name.
+                if folder and folder != "/" and text not in sources_only and _over_python(folder, self.venvs):
+                    self.report.unseen.append(
+                        (number, f"writes {text}, which may replace the Python or pip a later install runs")
+                    )
                 if _names_config(text):
                     self.config_error = (
                         f"line {number}: `{' '.join(texts)[:60]}` names {text}, which may be a pip or uv config file"
@@ -2205,6 +2261,8 @@ class _RunReader:
         for entry in value.split(":"):
             if entry in ("$PATH", "${PATH}"):
                 return self.path  # the earlier PATH, from here on
+            if "$" in entry:
+                return "unknown", f"{where} puts {entry}, a value wheelgap doesn't know, first on the PATH"
             if entry.startswith("/") or cwd is not None:
                 entry = posixpath.normpath(posixpath.join(cwd or "/", entry))
             if entry in _IMAGE_PYTHON_DIRS or (not self.image_read and entry in _BIN_DIRS):
@@ -2327,6 +2385,15 @@ class _RunReader:
         name = first.text
         base = posixpath.basename(name)
         pythonish = _PIP_RE.fullmatch(base) or _PYTHON_RE.fullmatch(base)
+        texts = [word.text for word in words[1:]]
+        if (_PIP_RE.fullmatch(base) and texts[:1] and texts[0] in _PIP_PROBES) or (
+            _PYTHON_RE.fullmatch(base)
+            and (
+                texts in [[probe] for probe in _PYTHON_PROBES]
+                or (texts[:2] == ["-m", "pip"] and texts[2:3] and texts[2] in _PIP_PROBES)
+            )
+        ):
+            return "pip", ""  # `python --version`, `pip list`: nothing is installed, whichever Python it is
         version = self._python(name, base, cwd, shown, stop) if pythonish else None
         if "/" in name and posixpath.dirname(name) not in _BIN_DIRS and not pythonish:
             if base in _INSTALLERS or base == "uv":
@@ -2385,6 +2452,10 @@ class _RunReader:
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
         if base == "find" and any(word.text in ("-exec", "-execdir", "-ok", "-okdir") for word in args):
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
+        if base not in _READ_COMMANDS and _HIDDEN_INSTALL_RE.search(" ".join(word.text for word in args)):
+            # Programs that run what their arguments say (`node -e`, `sed 'e …'`, `npm exec -- pip install`);
+            # echo and the other read-only commands only print it.
+            return "warning", f"`{shown}`, which names an installer in its arguments"
         if base in ("awk", "gawk", "mawk", "nawk") and any("system" in word.text or "|" in word.text for word in args):
             return "warning", f"`{shown}`, which can run commands wheelgap can't see"
         if base in _SYSTEM_COMMANDS and self._local_package(base, [word.text for word in args]):
@@ -2784,10 +2855,12 @@ def _dockerfile_requirements(
     final_line = froms[-1][0]
     # The FROM that names the final image: an earlier one if the final stage builds on a stage (`FROM ${BASE}` too).
     image_read = True  # an official python image, whose own Python is in /usr/local/bin
+    official = False  # the official python image: no WORKDIR of its own
     try:
         base_image, base_platform, base_line, _, _ = _final_from(text, build_args)
         try:
             parse_image(base_image, base_platform)
+            official = _image_name(base_image) in IMAGE_NAMES
         except UnknownImageError:
             image_read = False
     except UnknownImageError as e:
@@ -2809,7 +2882,11 @@ def _dockerfile_requirements(
             "stage built FROM an image"
         )
     start = max(i for i, (number, _) in enumerate(instructions) if number == final_line)
-    workdir: str | None = None
+    # A stage starts in its image's WorkingDir, or "/" when the image sets none (convert.go at dd75b49 runs
+    # dispatchWorkdir only `if d.image.Config.WorkingDir != ""`, and an llb.State's dir defaults to "/"). The official
+    # python images, and the debian, buildpack-deps and alpine images they are built FROM, set none; for any other
+    # image it isn't known.
+    workdir: str | None = "/" if official else None
     workdir_error: str | None = None
     run_error: str | None = None  # an instruction that changes how a later RUN installs
     dirs = {"/"}
@@ -3032,6 +3109,7 @@ def _dockerfile_requirements(
                 )
             bash = re.match(r'\[\s*"(?:/bin/|/usr/bin/)?bash"', args) is not None
         elif keyword in ("ENV", "ARG"):
+            before = dict(env)  # an ENV's values are expanded with the values before it
             pairs = _env_pairs(keyword, args, build_args or {}, global_defaults)
             if pairs is None:
                 # Not split into names with certainty: any name may have changed, and a setting may be among them.
@@ -3042,7 +3120,7 @@ def _dockerfile_requirements(
                     # `ENV PATH "$PATH:/root/go/bin"`: the legacy form with quotes, still split as written.
                     written = _written_value(args, "PATH") if keyword == "ENV" else None
                     reader.path = (
-                        reader._path_entry(written, f"ENV PATH on line {number}")
+                        reader._path_entry(_expand_known(written, before), f"ENV PATH on line {number}")
                         if written is not None
                         else ("unknown", f"the {keyword} on line {number} may change PATH")
                     )
@@ -3079,7 +3157,7 @@ def _dockerfile_requirements(
                 if name == "PATH":
                     written = _written_value(args, name) if keyword == "ENV" else None
                     reader.path = (
-                        reader._path_entry(written, f"ENV PATH on line {number}")
+                        reader._path_entry(_expand_known(written, before), f"ENV PATH on line {number}")
                         if written is not None
                         else ("unknown", f"the {keyword} on line {number} sets PATH")
                     )

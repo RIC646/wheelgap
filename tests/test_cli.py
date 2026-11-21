@@ -5104,14 +5104,147 @@ def test_project_exclude_newer_limits_range_resolution(fake_pypi, capsys, tmp_pa
     assert json.loads(out)["packages"][0]["version"] == "1.0"
 
 
-@pytest.mark.parametrize("value", ['"1 week"', '"2025-02-30"', '"2025-01-01T00:00:00"', "123"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"1 month"',  # uv refuses months and years: they have no fixed length
+        '"P1Y"',
+        '"3 fortnights"',
+        '"3 dayz"',
+        '" 3 days"',
+        '"1 day and 2 hours"',
+        '"5000000 days"',  # further back than uv's earliest timestamp
+        '"2025-02-30"',
+        '"2025-01-01T00:00:00"',
+        "123",
+        "true",
+        '{ timestamp = "2025-01-01T00:00:00Z", span = "P3D" }',  # uv's table form, which wheelgap doesn't read
+    ],
+)
 def test_project_exclude_newer_rejects_invalid_cutoffs(fake_pypi, capsys, tmp_path, value):
     path = tmp_path / "pyproject.toml"
     path.write_text(f'[project]\ndependencies = ["nowheels"]\n[tool.uv]\nexclude-newer = {value}\n', encoding="utf-8")
     code, out, err = run(capsys, str(path), "-p", "3.13", "-t", "win-arm64")
     assert code == 2
-    assert "exclude-newer" in err
+    assert f"{path}: [tool.uv] exclude-newer must be a date, an RFC 3339 timestamp, false or a duration: " in err
     assert fake_pypi == []
+
+
+RELEASED = {  # 2.0 came out on 2025-02-01; the tests below run "now" a few days later
+    "1.0": [{"filename": "dated-1.0-py3-none-any.whl", "upload_time_iso_8601": "2024-01-01T00:00:00Z"}],
+    "2.0": [{"filename": "dated-2.0-py3-none-any.whl", "upload_time_iso_8601": "2025-02-01T00:00:00Z"}],
+}
+
+
+@pytest.fixture
+def now_is(monkeypatch):
+    """Set the time uv's relative exclude-newer durations count back from."""
+    from datetime import datetime
+
+    from wheelgap import cutoff
+
+    def set_now(text):
+        monkeypatch.setattr(cutoff, "current_time", lambda: datetime.fromisoformat(text))
+
+    return set_now
+
+
+@pytest.mark.parametrize("script", [False, True])
+@pytest.mark.parametrize(
+    "duration, version, cutoff",
+    [
+        ("3 days", "1.0", "2025-01-31T00:00:00Z"),
+        ("P3D", "1.0", "2025-01-31T00:00:00Z"),
+        ("1 week", "1.0", "2025-01-27T00:00:00Z"),
+        ("1 day", "2.0", "2025-02-02T00:00:00Z"),
+        ("24 hours", "2.0", "2025-02-02T00:00:00Z"),
+        ("PT36H", "2.0", "2025-02-01T12:00:00Z"),
+        ("2 days", "1.0", "2025-02-01T00:00:00Z"),  # a file uploaded at the cutoff itself is left out, as by uv
+        ("47h 59m 59.999s", "2.0", "2025-02-01T00:00:00.001000Z"),
+        ("-3 days", "1.0", "2025-01-31T00:00:00Z"),  # uv takes the duration's absolute value
+        ("3 days ago", "1.0", "2025-01-31T00:00:00Z"),
+        ("0 days", "2.0", "2025-02-03T00:00:00Z"),
+    ],
+)
+def test_project_exclude_newer_duration_counts_back_from_now(
+    fake_pypi, capsys, tmp_path, monkeypatch, now_is, script, duration, version, cutoff
+):
+    from conftest import FAKE_INDEX
+
+    monkeypatch.setitem(FAKE_INDEX, "dated", RELEASED)
+    monkeypatch.delenv("UV_EXCLUDE_NEWER", raising=False)
+    now_is("2025-02-03T00:00:00+00:00")
+    if script:
+        path = tmp_path / "example.py"
+        text = f'# /// script\n# dependencies = ["dated>=1"]\n# [tool.uv]\n# exclude-newer = "{duration}"\n# ///\n'
+    else:
+        path = tmp_path / "pyproject.toml"
+        text = f'[project]\ndependencies = ["dated>=1"]\n[tool.uv]\nexclude-newer = "{duration}"\n'
+    path.write_text(text, encoding="utf-8")
+    code, out, err = run(capsys, str(path), "-p", "3.13", "-t", "win-arm64", "--json")
+    assert code == 0
+    assert json.loads(out)["packages"][0]["version"] == version
+    assert (
+        f"wheelgap: note: {path.name}: a duration counts back from the time of this run, as uv counts it back from "
+        f'the time it resolves: exclude-newer = "{duration}" is {cutoff}\n'
+    ) in err
+    # -q drops the note, not the cutoff.
+    code, out, err = run(capsys, str(path), "-p", "3.13", "-t", "win-arm64", "--json", "-q")
+    assert json.loads(out)["packages"][0]["version"] == version and "a duration counts back" not in err
+
+
+def test_project_exclude_newer_duration_moves_with_the_clock(fake_pypi, capsys, tmp_path, monkeypatch, now_is):
+    from conftest import FAKE_INDEX
+
+    monkeypatch.setitem(FAKE_INDEX, "dated", RELEASED)
+    path = tmp_path / "pyproject.toml"
+    path.write_text('[project]\ndependencies = ["dated"]\n[tool.uv]\nexclude-newer = "1 week"\n', encoding="utf-8")
+    versions = []
+    for now in ("2025-02-07T23:59:59+00:00", "2025-02-08T00:00:00+00:00", "2025-02-08T00:00:00.001+00:00"):
+        now_is(now)
+        code, out, _ = run(capsys, str(path), "-p", "3.13", "-t", "win-arm64", "--json")
+        versions.append(json.loads(out)["packages"][0]["version"])
+    assert versions == ["1.0", "1.0", "2.0"]  # 2.0 is a week old one millisecond after 2025-02-08T00:00:00Z
+
+
+@pytest.mark.parametrize(
+    "settings, version, notes",
+    [
+        ('exclude-newer = "1 week"\nexclude-newer-package = { Dated = "1 day" }', "2.0", 2),
+        ('exclude-newer = "1 day"\nexclude-newer-package = { dated = "P1W" }', "1.0", 2),
+        ('exclude-newer = "2025-03-01"\nexclude-newer-package = { dated = "1 week" }', "1.0", 1),
+        ('exclude-newer = "1 week"\nexclude-newer-package = { dated = false }', "2.0", 1),
+        ('exclude-newer = "1 week"\nexclude-newer-package = { other = "1 day" }', "1.0", 2),
+        ("exclude-newer = false", "2.0", 0),  # uv: no cutoff, whatever the user's own settings say
+        ('exclude-newer = false\nexclude-newer-package = { dated = "30 days" }', "1.0", 1),
+    ],
+)
+def test_project_exclude_newer_durations_per_package(
+    fake_pypi, capsys, tmp_path, monkeypatch, now_is, settings, version, notes
+):
+    from conftest import FAKE_INDEX
+
+    monkeypatch.setitem(FAKE_INDEX, "dated", RELEASED)
+    monkeypatch.delenv("UV_EXCLUDE_NEWER", raising=False)
+    now_is("2025-02-03T00:00:00+00:00")
+    path = tmp_path / "pyproject.toml"
+    path.write_text(f'[project]\ndependencies = ["dated"]\n[tool.uv]\n{settings}\n', encoding="utf-8")
+    code, out, err = run(capsys, str(path), "-p", "3.13", "-t", "win-arm64", "--json")
+    assert code == 0 and json.loads(out)["packages"][0]["version"] == version
+    assert err.count("a duration counts back") == bool(notes) and err.count('" is 2025-') == notes
+
+
+def test_exclude_newer_duration_in_a_uv_toml_beside_it(fake_pypi, capsys, tmp_path, monkeypatch, now_is):
+    from conftest import FAKE_INDEX
+
+    monkeypatch.setitem(FAKE_INDEX, "dated", RELEASED)
+    now_is("2025-02-03T00:00:00+00:00")
+    (tmp_path / "uv.toml").write_text('exclude-newer = "3 days"\n', encoding="utf-8")
+    path = tmp_path / "pyproject.toml"
+    path.write_text('[project]\ndependencies = ["dated"]\n[tool.uv]\nexclude-newer = "1 day"\n', encoding="utf-8")
+    code, out, err = run(capsys, str(path), "-p", "3.13", "-t", "win-arm64", "--json")
+    assert code == 0 and json.loads(out)["packages"][0]["version"] == "1.0"
+    assert 'exclude-newer = "3 days" is 2025-01-31T00:00:00Z' in err
 
 
 DATED = {
@@ -5179,7 +5312,8 @@ def test_project_exclude_newer_package_overrides_the_cutoff(
 @pytest.mark.parametrize(
     "settings",
     [
-        'exclude-newer-package = { dated = "7 days" }',
+        'exclude-newer-package = { dated = "7 months" }',
+        'exclude-newer-package = { dated = "7 dys" }',
         "exclude-newer-package = { dated = true }",
         'exclude-newer-package = "2025-01-01"',
         'exclude-newer-package = { dated = "2025-01-01", Dated = "2025-01-02" }',

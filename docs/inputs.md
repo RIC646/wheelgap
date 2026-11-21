@@ -460,12 +460,30 @@ For `pyproject.toml` inputs and PEP 723 scripts, wheelgap applies uv's `exclude-
 at or after the cutoff is left out, so a release is checked with only its earlier files, and a release with none of
 them is passed over. That holds for ranges, unpinned requirements and exact `==` pins alike, with and without
 `--deps`: a wheel added to a pinned release after the cutoff isn't counted, and a pinned release uploaded after it is
-unknown, since uv won't install it. `exclude-newer-package` gives each package it names its own cutoff, or none with
-`false`.
+unknown, since uv won't install it. `exclude-newer-package` gives each package it names its own cutoff (a
+timestamp, a date or a duration), or none with `false`.
 
 A cutoff is an RFC 3339 timestamp with an explicit offset (for example `"2025-01-01T00:00:00Z"`), or a `"YYYY-MM-DD"`
-date, which includes that whole day in the local time zone, as uv does. uv's relative durations (`"7 days"`, `"P7D"`)
-and any other value are input errors: the cutoff a duration gives moves with the clock.
+date, which includes that whole day in the local time zone, as uv does. It can also be a duration (after 0.13.0),
+uv's [dependency cooldown](https://docs.astral.sh/uv/concepts/resolution/#dependency-cooldowns): `"3 days"`,
+`"1 week"`, `"24 hours"`, `"P3D"`, `"PT24H"`. uv counts a duration back from the current time whenever it resolves,
+and wheelgap counts it back from the time of the run, so the answer is what `uv lock` would pick now and can change
+from one run to the next; a note on stderr gives the cutoff that was used (`-q` drops it).
+
+Durations are read exactly as uv reads them:
+
+- either jiff's "friendly" format (`3 days`, `1w 2d`, `2 hours, 30 minutes`, `1.5h`, `2d 12:30:00`, with unit names
+  from `weeks`/`wks`/`wk`/`w` down to `ns`) or an ISO 8601 duration (`P3D`, `P1W2D`, `PT36H`, `P1DT1.5H`);
+- a day is 24 hours and a week 7 days, in UTC, whatever the local time zone does;
+- a sign or `ago` changes nothing (`-3 days` and `3 days ago` are `3 days`), and `0 days` is the current time;
+- months and years are refused, as by uv, since they have no fixed length;
+- a file uploaded at the cutoff itself is left out, compared in whole milliseconds.
+
+`exclude-newer = false` means no cutoff. Any other value is an input error that names the file: a duration uv
+refuses (`"1 month"`, `"3 dayz"`, `"1.5 days"`), a date or timestamp written another way (`"20250101"`,
+`"2025-01-01T00:00:00"` without an offset), and uv's table form (`{ timestamp = ..., span = ... }`), which wheelgap
+doesn't read. uv itself warns about a value it can't read and then ignores the file's settings; wheelgap stops, since
+the project meant to set a cutoff.
 
 The settings are read from the script's own block, or for a `pyproject.toml` from its `[tool.uv]` table, or from a
 `uv.toml` beside it, which uv reads instead. For a uv workspace member, uv uses the workspace root's settings (its

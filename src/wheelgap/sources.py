@@ -27,7 +27,8 @@ from packaging.utils import (
 )
 from packaging.version import InvalidVersion, Version
 
-from .cutoff import parse_cutoff
+from . import cutoff as cutoffs
+from .cutoff import describe, is_duration, parse_cutoff
 
 if TYPE_CHECKING:
     from .targets import Target
@@ -166,6 +167,9 @@ class Source:
     exclude_newer_package: dict[str, datetime | None] = field(default_factory=dict)
     # A uv setting that may set a cutoff here but that wheelgap doesn't read, for a note.
     exclude_newer_unread: str | None = None
+    # The cutoffs above that came from a duration ("3 days"), which uv counts back from the time it resolves and
+    # wheelgap from the time of the run: each setting as written, with the cutoff it gave, for a note.
+    exclude_newer_durations: list[str] = field(default_factory=list)
     # Retain uv edge provenance for an explicit installation selection. The existing flattened
     # graph remains untouched, preserving conservative behavior when no selectors are supplied.
     uv_packages: list[dict] | None = None
@@ -1525,7 +1529,9 @@ def _read_exclude_newer(source: Source, data: dict, path: Path, script: bool) ->
     """uv's exclude-newer and exclude-newer-package for this input (#521): from a script's own [tool.uv], or for a
     pyproject.toml from a uv.toml beside it when there is one (uv then ignores [tool.uv]), else its [tool.uv]. For a
     workspace member, uv reads the workspace root's settings in the same way and ignores the member's. A cutoff is a
-    timestamp or a date; uv's relative durations are refused, and so is anything else."""
+    timestamp, a date or a duration counted back from now (cutoff.parse_cutoff); anything else is refused. (uv
+    0.13.1 itself warns about a value it can't read and then ignores the file's settings; wheelgap stops, since the
+    project meant to set a cutoff.)"""
     workspace = None if script else _workspace_root(path, data)
     if script:
         settings, config = _table(_table(data, "tool"), "uv"), path
@@ -1550,14 +1556,23 @@ def _read_exclude_newer(source: Source, data: dict, path: Path, script: bool) ->
                 f"workspace root's settings ({config}), and so does wheelgap"
             )
     where = f"{config}:" if config.name == "uv.toml" else f"{config}: [tool.uv]"
-    if "exclude-newer" in settings:
+    now = cutoffs.current_time()  # one time for every duration in the file
+
+    def read(setting: str, value: object, or_false: str = "") -> datetime:
         try:
-            source.exclude_newer = parse_cutoff(settings["exclude-newer"])
+            cutoff = parse_cutoff(value, now)
         except ValueError as e:
+            table = " (wheelgap doesn't read uv's table form)" if isinstance(value, dict) else ""
             raise SourceError(
-                f"{where} exclude-newer must be a date or RFC 3339 timestamp: {e} "
-                "(wheelgap doesn't read uv's relative durations)"
+                f"{where} {setting} must be a date, an RFC 3339 timestamp{or_false or ' or'} a duration: {e}{table}"
             ) from None
+        if is_duration(value):
+            source.exclude_newer_durations.append(f'{setting} = "{value}" is {describe(cutoff)}')
+        return cutoff
+
+    # `exclude-newer = false` turns off a cutoff from settings uv reads before these (the user's own): none here.
+    if settings.get("exclude-newer", False) is not False:
+        source.exclude_newer = read("exclude-newer", settings["exclude-newer"], ", false or")
     per_package = settings.get("exclude-newer-package", {})
     if not isinstance(per_package, dict):
         raise SourceError(f"{where} exclude-newer-package must be a table of package names")
@@ -1565,13 +1580,9 @@ def _read_exclude_newer(source: Source, data: dict, path: Path, script: bool) ->
         key = canonicalize_name(name)
         if key in source.exclude_newer_package:
             raise SourceError(f"{where} exclude-newer-package names {key!r} twice once normalized")
-        try:
-            source.exclude_newer_package[key] = None if value is False else parse_cutoff(value)
-        except ValueError as e:
-            raise SourceError(
-                f"{where} exclude-newer-package {name} must be a date, an RFC 3339 timestamp or false: {e} "
-                "(wheelgap doesn't read uv's relative durations)"
-            ) from None
+        source.exclude_newer_package[key] = (
+            None if value is False else read(f"exclude-newer-package {name}", value, ", false or")
+        )
     if workspace is None:  # a workspace root always has settings: uv looks no further up
         source.exclude_newer_unread = _unread_exclude_newer(path, script)
 

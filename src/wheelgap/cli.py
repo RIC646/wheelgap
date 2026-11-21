@@ -2296,6 +2296,12 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         # Always, like the note below: either may mean uv applies another upload cutoff than the one checked.
         if source.exclude_newer_unread is not None:
             print(f"wheelgap: note: {source.label}: {source.exclude_newer_unread}", file=sys.stderr)
+        if source.exclude_newer_durations and not quiet:  # the answer is uv's either way, so -q drops it
+            print(
+                f"wheelgap: note: {source.label}: a duration counts back from the time of this run, as uv counts "
+                f"it back from the time it resolves: {', '.join(source.exclude_newer_durations)}",
+                file=sys.stderr,
+            )
         if source.pyproject_extras is not None and os.environ.get("UV_EXCLUDE_NEWER"):
             print(
                 f"wheelgap: note: {source.label}: UV_EXCLUDE_NEWER is set, which uv uses over the file's "

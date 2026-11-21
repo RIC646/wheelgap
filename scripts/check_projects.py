@@ -1371,7 +1371,8 @@ def results_json(
         "inputs": len({(e["id"], e["kind"]) for e in manifest["inputs"]}),
         "totals": {name: totals(group) for name, group in sorted(sets.items())},
         "by_target": {name: breakdown(group, "target") for name, group in sorted(sets.items())},
-        "cells": [c.__dict__ for c in cells],
+        # An agreeing cell's command is the one its target's other cells share: kept only where it explains something.
+        "cells": [dict(c.__dict__, command="") if c.verdict == AGREE else c.__dict__ for c in cells],
     }
 
 
@@ -1518,7 +1519,7 @@ def main(argv: list[str] | None = None) -> int:
         cells += got
     seconds = (datetime.datetime.now() - start).total_seconds()
     data = results_json(cells, versions, targets, {"inputs": inputs}, seconds)
-    (args.output / "results.json").write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    (args.output / "results.json").write_text(json.dumps(data, separators=(",", ":")) + "\n", encoding="utf-8")
     with open(args.output / "report.txt", "w", encoding="utf-8") as text:
         code = report(cells, versions, seconds, out=text)
     sys.stdout.write((args.output / "report.txt").read_text(encoding="utf-8"))

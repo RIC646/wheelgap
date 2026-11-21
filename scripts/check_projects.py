@@ -60,7 +60,12 @@ it runs (3.13.13), where wheelgap's target is the release in general. A differen
 path or fork in the lock turns on one of those markers is listed as not compared, with the reason. Targets a referee
 refuses (uv: outside the lock's `environments`, or outside the project's requires-python) are compared at the
 target level: when wheelgap refuses too, they agree; when wheelgap answers for a Python the project excludes, that is
-wheelgap's design (it shows what blocks the upgrade), so it is not compared.
+wheelgap's design (it shows what blocks the upgrade), so it is not compared. So that such a project is compared at
+all, a uv.lock whose requires-python allows none of the targets' Pythons (`==3.11.*`) is also checked at the newest
+Python it allows (3.9 to 3.14) on the same platforms (--no-own-python turns this off). A project whose
+`required-version` needs a newer uv is listed as not compared. uv runs with --python-preference system, so a
+project's `python-preference = "only-managed"` doesn't stop it: it picks where the interpreter comes from, not what
+installs.
 
 Output (-o DIR): results.json (tool versions, totals, per target and per input kind, every cell with both answers,
 the verdict, the reason and the referee command) and report.txt (the totals, the agreement rate per target and per

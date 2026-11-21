@@ -4340,3 +4340,46 @@ def test_cli_dockerfile_inputs_names_one_line_in_the_singular(tmp_path, capsys, 
     path = _context(tmp_path, _IMG + _INSTALL + "COPY --from=web:1 /dist /app/static\n")
     assert main(["--dockerfile", str(path), "--dockerfile-inputs"]) == 0
     assert f"{path} line 5 copies files from another stage or image: any Python" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        # C2: an installer named in another program's arguments, with options or separate quoted words in between.
+        (
+            "RUN node -e \"require('child_process').execSync('pip --no-cache-dir install idna')\"\n" + _INSTALL,
+            ":4: .*names an installer",
+        ),
+        ('RUN ruby -e \'system("pip", "install", "idna")\'\n' + _INSTALL, ":4: .*names an installer"),
+        (
+            "RUN node -e \"require('child_process').execFileSync('pip', ['install','idna'])\"\n" + _INSTALL,
+            ":4: .*names an installer",
+        ),
+        ("RUN git -c alias.x='!pip -q install idna' x\n" + _INSTALL, ":4: .*names an installer"),
+        # E: bash -c sources $BASH_ENV before every RUN.
+        (
+            'SHELL ["/bin/bash", "-c"]\nRUN echo "export PIP_INDEX_URL=https://example.invalid/simple" > /etc/x.sh\n'
+            "ENV BASH_ENV=/etc/x.sh\n" + _INSTALL,
+            ":7: bash runs the file ENV BASH_ENV on line 6",
+        ),
+        # B2: an ENV entry wheelgap can't expand may be any folder, so a later copy into it stops.
+        (
+            "ARG BASE\nENV PYTHONPATH=$BASE/deps\n"
+            "COPY --from=python:3.13 /usr/local/lib/python3.13/site-packages /deps\n" + _INSTALL,
+            ":6: this line copies files into a folder ENV PYTHONPATH on line 5 names",
+        ),
+    ],
+)
+def test_dockerfile_requirements_stops_on_third_review_cases(tmp_path, body, error):
+    with pytest.raises(DockerfileError, match=error):
+        _inputs(tmp_path, body)
+
+
+def test_dockerfile_requirements_reads_only_plain_runs_on_a_windows_image(tmp_path):
+    # D: on a Windows image RUN runs in cmd /S /C, where `set X=...&& pip install` gives pip another index.
+    head = "FROM python:3.12-windowsservercore\nWORKDIR /app\nCOPY requirements.txt .\n"
+    path = _context(tmp_path, head + "RUN set PIP_INDEX_URL=https://example.invalid/simple&& pip install six==1.16.0\n")
+    with pytest.raises(DockerfileError, match=":4: on a Windows image this RUN runs in cmd"):
+        dockerfile_requirements(path)
+    path = _context(tmp_path, head + "RUN pip install -r requirements.txt\n")
+    assert dockerfile_requirements(path)

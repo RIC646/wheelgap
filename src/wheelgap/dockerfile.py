@@ -1917,9 +1917,12 @@ _VERSIONED_RE = re.compile(r"(?:pip|python)(\d+\.\d+)", re.ASCII)
 # An installer run from inside another program's arguments: `node -e "…execSync('pip install x')"`, `ruby -e`,
 # `sed 'e pip install x'`, `git -c alias.x='!pip install x' x`, `tar --checkpoint-action=exec=…`.
 _HIDDEN_INSTALL_RE = re.compile(
-    r"(?<![\w.-])(?:pip[0-9.]*\s+(?:install|download|wheel)|uv\s+(?:pip|sync|tool|add|run))\b|-m\s*pip\b|"
-    r"(?<![\w.-])(?:poetry|pdm|pipenv|conda|mamba|micromamba|pipx|easy_install)\s+(?:install|add|sync|create)\b"
+    r"(?<![\w.-])(?:pip[0-9.]*|uv|poetry|pdm|pipenv|conda|mamba|micromamba|pipx|easy_install)(?![\w.-])"
+    r".*?(?<![\w-])(?:install|download|wheel|sync|add|run|create)(?![\w-])|-m\s*pip\b",
+    re.DOTALL,
 )
+# Commands whose arguments are files or package names, never a command line they run.
+_NO_HIDDEN_COMMANDS = frozenset("cp mv ln install rm rmdir mkdir chmod chown chgrp touch".split())
 # A file in a bin folder that is a Python, a pip or uv, and files Python reads at start-up.
 _PYTHON_FILE_RE = re.compile(r"(?:python|pip|uv|uvx)[0-9.]*(?:-config)?|.*\.pth|(?:site|user)customize\.py", re.ASCII)
 # Read-only probes: they don't install, so they don't need to be the image's Python.
@@ -2583,7 +2586,9 @@ class _RunReader:
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
         if base == "find" and any(word.text in ("-exec", "-execdir", "-ok", "-okdir") for word in args):
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
-        if base not in _READ_COMMANDS and _HIDDEN_INSTALL_RE.search(" ".join(word.text for word in args)):
+        if base not in _READ_COMMANDS | _NO_HIDDEN_COMMANDS | _SYSTEM_COMMANDS and _HIDDEN_INSTALL_RE.search(
+            " ".join(word.text for word in args)
+        ):
             # Programs that run what their arguments say (`node -e`, `sed 'e …'`, `npm exec -- pip install`);
             # echo and the other read-only commands only print it.
             return "warning", f"`{shown}`, which names an installer in its arguments"
@@ -3006,11 +3011,13 @@ def _dockerfile_requirements(
     final_line = froms[-1][0]
     image_read = True  # an official python image, whose own Python is in /usr/local/bin
     official = False  # the official python image: no WORKDIR of its own
+    windows = False  # a Windows image, whose RUN lines run in cmd /S /C, not sh
+    bash_env: int | None = None  # the line of an ENV or ARG that sets BASH_ENV, which bash -c runs first
     try:
         # The errors plain --dockerfile gives for the FROM lines come first.
         base_image, base_platform, _, _, _ = _final_from(text, build_args)
         try:
-            parse_image(base_image, base_platform)
+            windows = parse_image(base_image, base_platform).platform.startswith("win")
             official = _image_name(base_image) in IMAGE_NAMES
         except UnknownImageError:
             image_read = False
@@ -3338,6 +3345,8 @@ def _dockerfile_requirements(
                 )
             bash = re.match(r'\[\s*"(?:/bin/|/usr/bin/)?bash"', args) is not None
         elif keyword in ("ENV", "ARG"):
+            if re.search(r"(?<![A-Za-z0-9_])BASH_ENV(?![A-Za-z0-9_])", args):
+                bash_env = number
             before = dict(env)  # an ENV's values are expanded with the values before it
             pairs = _env_pairs(keyword, args, build_args or {}, global_defaults)
             if pairs is None:
@@ -3413,7 +3422,13 @@ def _dockerfile_requirements(
                                 f"--from={config.foreign} on line {config.line} brought, which may hold a pip.conf"
                             )
                     else:
-                        python_dirs[name] = (number, folders)  # for a COPY --from after this ENV
+                        # For a COPY --from after this ENV. An entry wheelgap can't expand (`$BASE/deps` with BASE an
+                        # ARG with no value, which BuildKit expands to "") may be any folder: "/" covers them all.
+                        unknown = any(
+                            "$" in entry and entry not in (f"${name}", f"${{{name}}}")  # not its own earlier value
+                            for entry in (written or "").split(":")
+                        )
+                        python_dirs[name] = (number, ["/"] if unknown else folders)
                     if name not in _CONFIG_VARIABLES and (
                         hit := next(
                             ((c, f) for f in folders for c in foreign if _within(c.dest, {f}) or _within(f, {c.dest})),
@@ -3433,6 +3448,16 @@ def _dockerfile_requirements(
                 elif name == "UV_SYSTEM_PYTHON":
                     uv_system = value is not None and value.lower() in ("1", "true")
         elif keyword == "RUN":
+            if windows and not _PLAIN_ARGS_RE.fullmatch(_args_after_flags(args, "\\").strip()):
+                raise DockerfileError(
+                    f"line {number}: on a Windows image this RUN runs in cmd /S /C, whose quoting, variables and "
+                    f"operators --dockerfile-inputs doesn't read: only one plain command per RUN is ({_PLAIN})"
+                )
+            if bash and bash_env is not None:
+                raise DockerfileError(
+                    f"line {number}: bash runs the file ENV BASH_ENV on line {bash_env} names before this RUN, and "
+                    "--dockerfile-inputs can't see into it"
+                )
             body = "\n".join(bodies.get(number, []))
             for install in reader.read(
                 number, instruction, args, env, workdir, workdir_error, uv_system, arg_values, bash, body

@@ -1130,8 +1130,16 @@ def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
             "has no `RUN pip install` that --dockerfile-inputs can read \\(it has commands wheelgap can't see "
             "into, which may install some: line 2\\)",
         ),
-        ("FROM python:3.13\nCOPY . .\nRUN pip install -r /requirements.txt\n", ":2: COPY to \\.: a relative"),
-        ("FROM python:3.13\nRUN pip install -r requirements.txt\n", ":2: -r requirements.txt is relative"),
+        # Another image may set a WORKDIR of its own.
+        (
+            "FROM ghcr.io/astral-sh/uv:python3.13-bookworm\nCOPY . .\nRUN pip install -r /requirements.txt\n",
+            ":2: COPY to \\.: a relative",
+        ),
+        # Another image may set a WORKDIR of its own.
+        (
+            "FROM ghcr.io/astral-sh/uv:python3.13-bookworm\nRUN pip install -r requirements.txt\n",
+            ":2: -r requirements.txt is relative",
+        ),
         ("FROM python:3.13\nWORKDIR /app\nRUN pip install -r requirements.txt\n", "isn't copied from the build"),
         (
             "FROM python:3.13 AS build\nCOPY . /app\nONBUILD RUN pip install six\nFROM build\n"
@@ -1636,7 +1644,8 @@ def test_dockerfile_requirements_prefer_binary_needs_pins_and_no_deps(tmp_path, 
             ":4: /app/constraints.txt isn't copied from the build context",
         ),
         (
-            "FROM python:3.13\nCOPY . /app/\nRUN pip install -r /app/requirements.txt --constraint constraints.txt\n",
+            "FROM ghcr.io/astral-sh/uv:python3.13-bookworm\nCOPY . /app/\n"
+            "RUN pip install -r /app/requirements.txt --constraint constraints.txt\n",
             "purewheel==3.1\n",
             ":3: -c constraints.txt is relative, but no WORKDIR",
         ),
@@ -3524,7 +3533,8 @@ def test_dockerfile_requirements_reads_the_stages_the_final_stage_builds_on(tmp_
         (_BASE + "ADD x.tgz /app/\nFROM base\n" + _INSTALL, ":4: ADD isn't read"),
         # An ARG of a parent stage: newer BuildKit carries it over and older ones don't, so its value isn't used.
         (_BASE + "ARG V=1.16.0\nFROM base\nRUN pip install six==$V\n", ":6: .*six==\\$V isn't a value"),
-        ("FROM python:3.13\nWORKDIR /app\nFROM python:3.13\n" + _INSTALL, ":4: -r requirements.txt is relative"),
+        # The final stage starts in the image's "/", not in the WORKDIR of a stage it isn't built on.
+        ("FROM python:3.13\nWORKDIR /app\nFROM python:3.13\n" + _INSTALL, ":4: /requirements.txt isn't copied"),
         (_BASE + "FROM base\nRUN echo hi\n", "the final stage \\(line 4\\), like the 1 it builds on, has no `RUN pip"),
     ],
 )
@@ -3980,7 +3990,7 @@ def test_cli_dockerfile_inputs_warnings_cant_be_missed(tmp_path, capsys, fake_py
     # Markdown: the headline too.
     assert main([*argv, "--markdown"]) == 0
     out = capsys.readouterr().out
-    assert "### wheelgap: The 1 package wheelgap read has a wheel for 1 target; line 5 wasn't seen into" in out
+    assert "### wheelgap: the 1 package wheelgap read has a wheel for 1 target; line 5 wasn't seen into" in out
     assert "every package has a wheel" not in out
     # --json: summary.complete.
     assert main([*argv, "--json"]) == 0
@@ -4016,12 +4026,15 @@ def test_cli_dockerfile_inputs_warnings_cant_be_missed(tmp_path, capsys, fake_py
         ("WORKDIR /app\nCOPY sixa .\n", ["sixa"], "pip install six[a]", "COPY on line 3 puts sixa in /app"),
         ("WORKDIR /app\nCOPY src/ ./\n", ["src/sixa"], "pip install six[a]", "puts sixa in /app"),
         ("WORKDIR /app/sixa\nWORKDIR /app\n", [], "pip install six[a]", "a WORKDIR puts sixa in /app"),
-        ("WORKDIR /app\n", [], "mkdir sixa && pip install six[a]", "line 3 may put files in /app"),
+        ("WORKDIR /app\n", [], "mkdir sixa && pip install six[a]", "line 3 may put sixa in /app"),
         ("WORKDIR /app\n", [], "git clone https://example.test/x . && pip install six[a]", "may put files in /app"),
         # Where the folder's contents aren't known, it isn't read either.
-        ("", [], "pip install six[a]", "the folder it runs in isn't known"),
+        ("FROM ubuntu:24.04\n", [], "pip install six[a]", "the folder it runs in isn.t known"),
+        ("", [], "pip install us[r]", ":2: us\\[r\\] is a glob .* and the image puts usr in /"),  # g30
+        ("COPY sixa /\n", ["sixa"], "pip install six[a]", "the COPY on line 2 puts sixa in /"),
+        ("", [], "mkdir sixa && pip install six[a]", "line 2 may put sixa in /"),  # g28
         ("WORKDIR /usr/src/app\n", [], "pip install six[a]", "/usr/src/app is a folder of the image"),
-        ("WORKDIR /\n", [], "pip install six[a]", "/ is a folder of the image"),
+        ("WORKDIR /\n", [], "pip install li[b]", "the image puts lib in /"),
         # Paths with brackets are a project folder or an editable install, not a glob to wheelgap.
         ("WORKDIR /app\n", [], "pip install ./x[dev]", "pip install ./x\\[dev\\]: a project folder or a file"),
         ("WORKDIR /app\n", [], "pip install -e ./x[dev]", "pip install -e ./x\\[dev\\]: an editable install"),
@@ -4046,6 +4059,9 @@ def test_dockerfile_requirements_name_globs_and_paths(tmp_path, head, files, run
         ("WORKDIR /app\nCOPY . .\n", "pip install uvicorn[standard]", ["uvicorn[standard]"]),
         ("WORKDIR /app\n", "pip install 'six[a]'", ["six[a]"]),  # quoted: never a glob
         ("WORKDIR /app\nRUN mkdir -p /data/sixa\n", "pip install six[a]", ["six[a]"]),
+        ("WORKDIR /app\nRUN mkdir data\n", "pip install six[a]", ["six[a]"]),
+        # No WORKDIR on the python image: `/`, whose names are known (Scrapegraph-ai's scrapegraphai[burr]).
+        ("", "pip install scrapegraphai[burr]", ["scrapegraphai[burr]"]),
         # ARG then ENV, or an ARG with no value after an ENV: every builder gives the ENV's value.
         ("ARG VER=1.16.0\nENV VER=1.15.0\n", "pip install six==$VER", ["six==1.15.0"]),
         ("ENV VER=1.15.0\nARG VER\n", "pip install six==$VER", ["six==1.15.0"]),
@@ -4057,6 +4073,11 @@ def test_dockerfile_requirements_reads_names_no_file_can_match(tmp_path, head, r
 
 
 _M8_HEAD = "FROM python:3.13 AS build\nRUN pip install --target=/packages idna==3.10\nFROM python:3.13\nWORKDIR /app\n"
+
+
+# Second review (#657): writes over the image's Python or pip, installers named inside other programs' arguments,
+# and PATH values BuildKit expands.
+_PI = "RUN python -m pip install -r requirements.txt\n"
 
 
 @pytest.mark.parametrize(
@@ -4128,3 +4149,131 @@ def test_cli_dockerfile_inputs_says_a_single_copied_file_is_not_followed(tmp_pat
     captured = capsys.readouterr()
     [note] = [n for n in json.loads(captured.out)["dockerfile_notes"] if n["kind"] == "passed-over:copy-from"]
     assert note["message"] == "not followed: files copied from another stage or image, line 5"
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        # A: a RUN that writes over the Python or pip a later install runs (case names from the review).
+        (
+            "RUN ln -sf /usr/bin/python3 /usr/local/bin/python\n" + _PI,
+            ":4: this line writes /usr/local/bin/python",
+        ),  # g15
+        (
+            "RUN update-alternatives --install /usr/local/bin/python python /usr/bin/python3 99\n" + _PI,  # g16
+            ":4: this line writes /usr/local/bin/python, which may replace the Python or pip",
+        ),
+        (
+            "RUN printf '#!/bin/sh\\nexec pip3 \"$@\"\\n' > /usr/local/bin/pip\n" + _INSTALL,
+            ":4: .*writes /usr/local/bin/pip",
+        ),
+        ("RUN cp /usr/bin/pip3 /usr/local/bin/pip\n" + _INSTALL, ":4: .*writes /usr/local/bin/pip"),  # p19
+        ("RUN echo x | tee /usr/local/bin/pip\n" + _INSTALL, ":4: .*writes /usr/local/bin/pip"),  # p20
+        ("RUN cd /usr/local/bin && ln -sf /usr/bin/pip3 pip\n" + _INSTALL, ":4: this line writes pip"),  # p17
+        (
+            "RUN sed -i s/x/y/ /usr/local/lib/python3.13/site-packages/pip/_internal/models/target_python.py\n"
+            + _INSTALL,
+            ":4: .*writes /usr/local/lib/python3.13/site-packages/pip",
+        ),  # p21
+        ("RUN echo /opt/deps > /usr/local/lib/python3.13/site-packages/deps.pth\n" + _INSTALL, ":4: .*deps.pth"),  # p23
+        (
+            "RUN python -m venv /venv && ln -sf /usr/bin/python3 /venv/bin/python\n"
+            "RUN /venv/bin/pip install -r requirements.txt\n",
+            ":4: .*writes /venv/bin/python",
+        ),  # p02
+        # C: an installer named in a passed-over program's arguments.
+        (
+            "RUN node -e \"require('child_process').execSync('pip install idna==3.10')\"\n" + _INSTALL,
+            ":4: .*names an installer in its arguments",
+        ),  # r1
+        ("RUN ruby -e 'system(\"pip install idna==3.10\")'\n" + _INSTALL, ":4: .*names an installer"),  # r2
+        (
+            "RUN echo x | sed 'e pip install idna==3.10'\n" + _INSTALL,
+            ":4: .*`sed e pip install idna==3.10`, which names an installer",
+        ),  # r3
+        ("RUN git -c alias.x='!pip install idna==3.10' x\n" + _INSTALL, ":4: .*names an installer"),  # r5
+        ("RUN npm exec -- python3 -m pip install idna\n" + _INSTALL, ":4: .*names an installer"),
+        # bash's `hash -p` makes `pip` run another file.
+        (
+            'SHELL ["/bin/bash", "-c"]\nRUN hash -p /usr/bin/pip3 pip && pip install -r requirements.txt\n',
+            ":5: .*hash -p",
+        ),  # p15
+    ],
+)
+def test_dockerfile_requirements_stops_on_second_review_cases(tmp_path, body, error):
+    with pytest.raises(DockerfileError, match=error):
+        _inputs(tmp_path, body)
+
+
+def test_dockerfile_requirements_stops_on_update_alternatives_over_the_python_checked(tmp_path):
+    # s1: with -p/-t for ubuntu:22.04, python3 is the image's 3.10, until update-alternatives makes it 3.11.
+    run = (
+        "RUN apt-get update && apt-get install -y python3.11 python3-pip && "
+        "update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1\n"
+    )
+    head = "FROM ubuntu:22.04\nWORKDIR /app\nCOPY requirements.txt .\n"
+    path = _context(tmp_path, head + run + "RUN python3 -m pip install -r requirements.txt\n")
+    with pytest.raises(DockerfileError, match=":4: this line writes /usr/bin/python3, which may replace"):
+        dockerfile_requirements(path, pythons=("3.10",))
+    path = _context(
+        tmp_path,
+        head + "RUN ln -sf /usr/bin/python3.11 /usr/bin/python3\nRUN python3 -m pip install -r requirements.txt\n",
+    )
+    with pytest.raises(DockerfileError, match=":4: this line writes /usr/bin/python3"):  # s2
+        dockerfile_requirements(path, pythons=("3.10",))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Writes elsewhere, and copies from the Python's folders, are still passed over.
+        "RUN ln -s /usr/local/bin/python3 /opt/python\n" + _INSTALL,
+        "RUN cp /usr/local/bin/pip /tmp/pip-backup\n" + _INSTALL,
+        "RUN echo x > /usr/local/bin/myscript && chmod +x /usr/local/bin/myscript\n" + _INSTALL,
+        "RUN node -e \"console.log('hi')\" && git -c core.x=1 status\n" + _INSTALL,
+        "RUN echo 'run pip install -r requirements.txt' > /tmp/README\n" + _INSTALL,
+        # BuildKit expands an ENV value with the values before it: the usual venv recipe reads.
+        'ENV VIRTUAL_ENV=/opt/venv\nRUN python -m venv $VIRTUAL_ENV\nENV PATH="$VIRTUAL_ENV/bin:$PATH"\n'
+        + _INSTALL,  # p01
+        "RUN python -m venv /venv\nENV PATH /venv/bin:$PATH\n" + _INSTALL,  # g19
+        # Read-only probes after a PATH change don't install, whichever Python they run.
+        "ENV PATH=/opt/tools/bin:$PATH\nRUN python --version && pip --version && pip list && python -m pip freeze\n",
+    ],
+)
+def test_dockerfile_requirements_reads_second_review_cases(tmp_path, body):
+    lines, report = _inputs(
+        tmp_path, body if "pip install" in body else body + "ENV PATH=/usr/local/bin:$PATH\n" + _INSTALL
+    )
+    assert lines and report.warnings == []
+
+
+def test_dockerfile_requirements_path_entry_with_an_unknown_value_is_shown_as_written(tmp_path):
+    with pytest.raises(DockerfileError, match=r"puts \$VIRTUAL_ENV/bin, a value wheelgap doesn't know, first"):
+        _inputs(tmp_path, 'ENV PATH="$VIRTUAL_ENV/bin:$PATH"\n' + _INSTALL)
+
+
+def test_dockerfile_requirements_reads_the_root_folder_of_an_official_python_image(tmp_path):
+    # No WORKDIR: BuildKit runs and copies in "/", since the python image sets no WorkingDir.
+    path = _context(tmp_path, "FROM python:3.13\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n")
+    assert [line for line, _ in dockerfile_requirements(path)] == [3]
+
+
+def test_dockerfile_requirements_names_the_command_after_nice(tmp_path):
+    with pytest.raises(DockerfileError, match=":4: this line runs `./x.sh`, a script"):  # g07
+        _inputs(tmp_path, "RUN nice -n 10 ./x.sh\n" + _INSTALL)
+
+
+def test_cli_dockerfile_inputs_unread_image_is_not_complete(tmp_path, capsys, fake_pypi):
+    path = _context(tmp_path, "FROM ubuntu:24.04\nWORKDIR /app\nCOPY requirements.txt .\n" + _INSTALL)
+    argv = ["--dockerfile", str(path), "--dockerfile-inputs", "-p", "3.12", "-t", "linux-x86_64"]
+    assert main([*argv, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["complete"] is False
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "✓" not in out
+    assert "! The 1 package wheelgap read has a wheel for 1 target; the image wasn't read (-p and -t stand in" in out
+    assert main([*argv, "--markdown"]) == 0
+    assert (
+        "### wheelgap: the 1 package wheelgap read has a wheel for 1 target; the image wasn't read"
+        in capsys.readouterr().out
+    )

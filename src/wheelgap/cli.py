@@ -1021,6 +1021,7 @@ def report_json(
     dockerfile_warnings: list[dict[str, object]] | None = None,
     dockerfile_packages: list[dict[str, object]] | None = None,
     directory_inputs: list[dict[str, object]] | None = None,
+    image_unread: bool = False,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     gaps = [r for r in rows if not r.ok]
@@ -1125,7 +1126,8 @@ def report_json(
             "with_gaps": len(_group_rows(gaps)),
             "per_target": target_counts(gaps, targets),
             # --dockerfile-inputs: false when a line wheelgap couldn't see into may install more (dockerfile_warnings).
-            **({"complete": not dockerfile_warnings} if dockerfile_warnings is not None else {}),
+            # Also false when -p and -t stood in for an image wheelgap couldn't read.
+            **({"complete": not dockerfile_warnings and not image_unread} if dockerfile_warnings is not None else {}),
         },
     }
     if blocking is not None:
@@ -1276,6 +1278,17 @@ def dockerfile_markdown(results: list[tuple[str, str, int | None, str]]) -> list
 def unseen_lines(lines: list[int]) -> str:
     """`line 8 wasn't seen into`: the Dockerfile lines a --dockerfile-inputs answer doesn't cover."""
     return f"{_line_list(lines)} {'was' if len(lines) == 1 else 'were'}n't seen into"
+
+
+def dockerfile_qualifiers(warnings: list[dict[str, object]], image_unread: bool) -> list[str]:
+    """What a --dockerfile-inputs answer doesn't cover, for its headline: the lines wheelgap couldn't see into, and
+    an image -p and -t stood in for."""
+    qualifiers = []
+    if warnings:
+        qualifiers.append(unseen_lines(sorted({int(str(entry["line"])) for entry in warnings})))
+    if image_unread:
+        qualifiers.append("the image wasn't read (-p and -t stand in for it)")
+    return qualifiers
 
 
 def read_packages(count: int) -> str:
@@ -1473,16 +1486,17 @@ def render_markdown(
     issues_urls: dict[int, str | None] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
     fix_hint: str | None = None,
-    unseen: list[int] | None = None,
+    not_covered: list[str] | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment).
-    `unseen` lists the Dockerfile lines --dockerfile-inputs couldn't see into: the headline then says so."""
+    `not_covered` says what a --dockerfile-inputs answer doesn't cover (dockerfile_qualifiers): the headline then
+    says so."""
     plain = Style(False)
     gaps = [r for r in rows if not r.ok]
     total_pkgs = len(_group_rows(rows))
     gap_pkgs = len(_group_rows(gaps))
     n_t = len(targets)
-    not_seen = f"; {unseen_lines(unseen)}" if unseen else ""
+    not_seen = "".join(f"; {qualifier}" for qualifier in not_covered or ())
     if gaps:
         noun = "package" if total_pkgs == 1 else "packages"
         out = [
@@ -1491,9 +1505,9 @@ def render_markdown(
         ]
     elif not rows:  # "every package" reads like a success when the run checked nothing
         out = ["### wheelgap: no packages to check", ""]
-    elif unseen:
+    elif not_covered:
         out = [
-            f"### wheelgap: {read_packages(total_pkgs)} a wheel for {'all ' if n_t > 1 else ''}{n_t} "
+            f"### wheelgap: {read_packages(total_pkgs).lower()} a wheel for {'all ' if n_t > 1 else ''}{n_t} "
             f"target{'s' * (n_t > 1)}{apart_from_ignored(rows)}{not_seen}",
             "",
         ]
@@ -2152,6 +2166,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     dockerfile_warnings: list[dict[str, object]] = []
     unseen_line = ""  # the stdout line for commands that may install packages wheelgap can't see
     uv_named: set[int] = set()  # the id()s of the sources `uv pip install NAME` lines give
+    not_covered: list[str] = []  # what the headline says a --dockerfile-inputs answer doesn't cover
 
     def read_image() -> None:
         """The image of --dockerfile. One wheelgap can't read is an error, unless -p and -t say what to check."""
@@ -2241,6 +2256,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 )
             if args.dockerfile_inputs:
                 notes, dockerfile_warnings, unseen_line = dockerfile_report_notes(args.dockerfile, inputs_report)
+                not_covered = dockerfile_qualifiers(dockerfile_warnings, unknown_image is not None)
                 # A warning is part of the answer, so --quiet keeps it; the notes say what was passed over.
                 for entry in dockerfile_warnings:
                     print(f"wheelgap: warning: {args.dockerfile}:{entry['line']}: {entry['message']}", file=sys.stderr)
@@ -3115,6 +3131,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     }
                     for line, requirements, by_uv in inputs_report.named
                 ],
+                image_unread=bool(args.dockerfile_inputs) and unknown_image is not None,
                 directory_inputs=directory_inputs_json(sources),
             )
         )
@@ -3144,7 +3161,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         issues_urls=issues_urls,
                         pi_wheels=pi_wheels,
                         fix_hint=fix_hint,
-                        unseen=sorted({int(str(entry["line"])) for entry in dockerfile_warnings}),
+                        not_covered=not_covered,
                     ),
                     *gapwheels.markdown_lines(fills or [], multi_py),
                     *(["", f"> **Warning:** {unseen_line}"] if unseen_line else []),
@@ -3254,11 +3271,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not gaps:
         what = "The 1 package has" if total_pkgs == 1 else f"All {total_pkgs} packages have"
         every = f"{'every one of ' if n_t > 1 else ''}{n_t} target{'s' * (n_t > 1)}{apart_from_ignored(rows)}"
-        if unseen_line:
+        if not_covered:
             # Not a green tick: the answer is for the install lines read, and some lines weren't seen into.
-            lines = sorted({int(str(entry["line"])) for entry in dockerfile_warnings})
-            print(style.yellow(f"! {read_packages(total_pkgs)} a wheel for {every}; {unseen_lines(lines)}."))
-            print(style.yellow(f"! {unseen_line}"))
+            print(style.yellow(f"! {read_packages(total_pkgs)} a wheel for {every}; {'; '.join(not_covered)}."))
+            if unseen_line:
+                print(style.yellow(f"! {unseen_line}"))
         else:
             print(style.green(f"✓ {what} a wheel for {every}."))
         return code

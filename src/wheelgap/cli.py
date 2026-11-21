@@ -1663,10 +1663,7 @@ def directory_notes(found: DirectoryInput) -> list[str]:
     if found.empty:
         return instead
     if found.reason == "pyproject":
-        lines = [
-            f"no lockfile and no file named requirements.txt in {found.directory}, so {found.path}'s direct "
-            "dependencies were checked"
-        ]
+        lines = [f"no lockfile and no file named requirements.txt in {found.directory}, so {found.path} was checked"]
         # The other requirements files there, as commands: the first 3 (those that look compiled first), then a count.
         named, more = found.other_requirements[:3], len(found.other_requirements) - 3
         for path, compiled in named:

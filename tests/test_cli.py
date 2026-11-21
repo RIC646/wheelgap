@@ -3179,7 +3179,7 @@ def test_directory_without_lockfile_checks_pyproject(capsys, fake_pypi, tmp_path
     code, out, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64", "--json")
     assert code == 1  # as `wheelgap DIR/pyproject.toml` (tests/test_directory.py has the rest)
     assert {row["name"] for row in json.loads(out)["packages"]} == {"ranged", "fastlib"}
-    assert f"so {tmp_path / 'pyproject.toml'}'s direct dependencies were checked" in err
+    assert f"so {tmp_path / 'pyproject.toml'} was checked" in err
 
 
 def test_directory_with_groups_only_pyproject_suggests_group(capsys, fake_pypi, tmp_path):

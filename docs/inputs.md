@@ -50,7 +50,8 @@ is tried only if the one before found nothing, a note on stderr says which file 
    run (the first 3, then a count). One that looks like `pip-compile`, `uv pip compile` or `uv export` output is
    named first: `requirements-lock.txt looks compiled and pinned: wheelgap DIR/requirements-lock.txt checks what it
    pins`. It looks so when it has their mark (their header, `# via` comments or `--hash` options) and every package
-   it lists from an index is pinned with `==` or `===`. `--json` lists the same files in `directory_inputs`.
+   it lists from an index is pinned with `==` or `===`. Only the file itself is read for this hint: one over
+   2 MB, or one with a `-r` or `-c`, doesn't look so. `--json` lists the same files in `directory_inputs`.
 2. **A requirements file under another name** at the root: `requirements*.txt` or `requirements*.in`, or a `.txt` or
    `.in` file in `requirements/` (not a `.in` next to the `.txt` compiled from it, and not a name that starts, in
    any case, with `constraint`, `readme`, `license`, `licence`, `copying`, `notice`, `changelog`, `changes`,

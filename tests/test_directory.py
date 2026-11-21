@@ -67,8 +67,7 @@ def test_pyproject_is_checked_when_there_is_no_lockfile(capsys, fake_pypi, tmp_p
     assert "directory_inputs" not in json.loads(by_file[1])
     first, second = notes(err)
     assert first == (
-        f"no lockfile and no file named requirements.txt in {tmp_path}, so {tmp_path / 'pyproject.toml'}'s direct "
-        "dependencies were checked"
+        f"no lockfile and no file named requirements.txt in {tmp_path}, so {tmp_path / 'pyproject.toml'} was checked"
     )
     assert second.startswith("pyproject.toml lists direct dependencies only") and "add --deps for PyPI" in second
     assert notes(by_file[2]) == [second]
@@ -77,7 +76,7 @@ def test_pyproject_is_checked_when_there_is_no_lockfile(capsys, fake_pypi, tmp_p
 def test_note_naming_the_file_is_kept_with_quiet(capsys, fake_pypi, tmp_path):
     write(tmp_path, {"pyproject.toml": PROJECT})
     code, _, err = run(capsys, tmp_path, *ARGS, "--quiet")
-    assert code == 1 and f"so {tmp_path / 'pyproject.toml'}'s direct dependencies were checked" in err
+    assert code == 1 and f"so {tmp_path / 'pyproject.toml'} was checked" in err
 
 
 @pytest.mark.parametrize("name", ["requirements.txt", "uv.lock"])
@@ -97,7 +96,7 @@ def test_pyproject_without_dependencies_is_the_answer_when_nothing_else_is_found
     write(tmp_path, {"pyproject.toml": NO_DEPENDENCIES})
     code, out, err = run(capsys, tmp_path, *ARGS)
     assert code == 0 and "No packages to check." in out
-    assert f"so {tmp_path / 'pyproject.toml'}'s direct dependencies were checked" in err
+    assert f"so {tmp_path / 'pyproject.toml'} was checked" in err
 
 
 def test_pyproject_with_only_extras_is_checked_so_extra_can_select(capsys, fake_pypi, tmp_path):
@@ -206,8 +205,7 @@ def beside(tmp_path, err):
     """The notes after the first, which say what else is at the root."""
     first, *rest = notes(err)
     assert first == (
-        f"no lockfile and no file named requirements.txt in {tmp_path}, so {tmp_path / 'pyproject.toml'}'s direct "
-        "dependencies were checked"
+        f"no lockfile and no file named requirements.txt in {tmp_path}, so {tmp_path / 'pyproject.toml'} was checked"
     )
     return [line for line in rest if not line.startswith("pyproject.toml lists direct dependencies only")]
 
@@ -293,6 +291,28 @@ def test_requirements_files_that_dont_look_compiled_are_named_as_commands(capsys
         {"file": "requirements-foo.lock", "compiled": False}
     ]
     assert beside(tmp_path, err) == [f"other requirements files there: `{command(tmp_path / 'requirements-foo.lock')}`"]
+
+
+def test_the_hint_reads_only_the_file_itself(capsys, fake_pypi, tmp_path, monkeypatch):
+    # An include may name any file (a FIFO, /dev/zero, a huge one), and an oversized file isn't opened: for a hint,
+    # neither looks compiled, so wheelgap DIR never blocks or fills memory on what it doesn't read.
+    write(tmp_path, {"pyproject.toml": PROJECT, "requirements/base.txt": UV_COMPILED})
+    write(tmp_path, {"requirements-lock.txt": "-r requirements/base.txt\n", "requirements-big.txt": UV_COMPILED})
+    monkeypatch.setattr(sources, "_HINT_MAX_BYTES", len(UV_COMPILED) - 1)
+    code, out, _ = run(capsys, tmp_path, *ARGS, "--json")
+    assert json.loads(out)["directory_inputs"][0]["other_requirements"] == [
+        {"file": "requirements-big.txt", "compiled": False},
+        {"file": "requirements-lock.txt", "compiled": False},
+        {"file": "requirements/base.txt", "compiled": False},
+    ]
+
+
+def test_pyproject_with_no_dependencies_isnt_said_to_have_them(capsys, fake_pypi, tmp_path):
+    write(tmp_path, {"pyproject.toml": '[project]\nname = "app"\n[project.optional-dependencies]\nx = ["fastlib"]\n'})
+    code, out, err = run(capsys, tmp_path, *ARGS, "--json")
+    assert notes(err)[0] == (
+        f"no lockfile and no file named requirements.txt in {tmp_path}, so {tmp_path / 'pyproject.toml'} was checked"
+    )
 
 
 def test_many_requirements_files_beside_pyproject_are_counted(capsys, fake_pypi, tmp_path):

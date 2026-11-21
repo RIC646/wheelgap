@@ -128,7 +128,10 @@ lock's files if a lookup fails).
 - `environment=` picks a `pixi.lock` environment (default: `default`); for a project directory it makes
   `pixi.lock` the lockfile read. Naming one for any other lockfile raises `SourceError`.
 
-Without `deps=True`, `check_lockfile()` doesn't read `pyproject.toml` or a script as an input.
+Without `deps=True`, `check_lockfile()` doesn't read `pyproject.toml` or a script as an input. For a project
+directory it reads the lockfile it finds by name at the root, and nothing else: the command line's wider search
+([Which file is read](inputs.md#which-file-is-read)) comes with a note that says which file was picked, which a
+function's return value has no place for, so pass the file you mean.
 
 ### Pyodide
 

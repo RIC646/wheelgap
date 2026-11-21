@@ -1663,6 +1663,13 @@ _INSTALLERS = frozenset(
     "poetry pdm pipenv conda mamba micromamba pipx easy_install hatch pixi rye uvx pip-sync flit".split()
 )
 _SHELLS = frozenset("sh bash dash ash zsh ksh".split())
+# A distribution's own build of a Python package (Alpine's py3-yaml, Debian's python3-numpy), as against the
+# interpreter's own pieces.
+_SYSTEM_PYTHON_RE = re.compile(r"(?:py3|python3?(?:\.\d+)?)-([a-z0-9][a-z0-9.+_-]*)", re.ASCII)
+_SYSTEM_PYTHON_TOOLS = frozenset(
+    "dev devel pip venv virtualenv setuptools wheel distutils minimal full tk dbg doc libs apt pkg-resources "
+    "is-python3 software-properties".split()
+)
 # A `pip install` of only these, with no -r FILE, sets up pip itself: passed over, with a note that says they aren't
 # checked and that the pip the later lines run isn't known. (Each has only ever shipped a py3-none-any wheel; any
 # other tool a line installs, uv or poetry say, is a requirement like the rest.)
@@ -1723,6 +1730,9 @@ class InputsReport:
     notes: list[tuple[int, str, str]] = field(default_factory=list)  # (line, kind, message)
     # (line, the requirements a `pip install NAME...` on it names, whether uv installs them), in order.
     named: list[tuple[int, list[str], bool]] = field(default_factory=list)
+    # (line, name) for each Python package a system package command installs (apk add py3-yaml, apt-get install
+    # python3-numpy): pip keeps one that satisfies a requirement, where wheelgap checks a fresh install.
+    system_python: list[tuple[int, str]] = field(default_factory=list)
 
     def passed(self, kind: str, number: int) -> None:
         lines = self.passed_over.setdefault(kind, [])
@@ -2068,6 +2078,9 @@ class _RunReader:
         if base == "find" and any(word.text in ("-exec", "-execdir", "-ok", "-okdir") for word in args):
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
         if base in _SYSTEM_COMMANDS:
+            for word in args:
+                if (m := _SYSTEM_PYTHON_RE.fullmatch(word.text)) and m.group(1) not in _SYSTEM_PYTHON_TOOLS:
+                    self.report.system_python.append((number, word.text))
             return "system-packages", ""
         if base in _SHELL_COMMANDS or base == "find":
             return "shell", ""
@@ -2567,7 +2580,11 @@ def _dockerfile_requirements(
                     "wheel, so it's only read when every requirement on the line is pinned with == "
                     "and --deps isn't used"
                 )
-            report.named.append((number, install.names, uv))
+            # One entry per RUN line and installer: `pip install a && pip install b` names a and b on the line.
+            if report.named and report.named[-1][0] == number and report.named[-1][2] == uv:
+                report.named[-1][1].extend(install.names)
+            else:
+                report.named.append((number, list(install.names), uv))
         # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
         if unread := next((copy for copy in copies if copy.error), None):
             raise DockerfileError(f"line {unread.line}: {unread.error}")

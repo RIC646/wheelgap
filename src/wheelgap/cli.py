@@ -51,7 +51,7 @@ from .dockerfile import (
     dockerfile_requirements,
     read_dockerfile,
 )
-from .github import github_annotations
+from .github import github_annotations, relative_path, workflow_command
 from .install_log import failed_builds, log_source, read_log
 from .junit import write_junit
 from .logsafe import guarded_output, write_command
@@ -117,6 +117,7 @@ from .targets import (
     next_python_note,
     parse_api_level,
     parse_ios_version,
+    parse_python,
     parse_version_pair,
     resolve_distro,
     resolve_platform,
@@ -1116,6 +1117,8 @@ def report_json(
             "packages": len(_group_rows(rows)),
             "with_gaps": len(_group_rows(gaps)),
             "per_target": target_counts(gaps, targets),
+            # --dockerfile-inputs: false when a line wheelgap couldn't see into may install more (dockerfile_warnings).
+            **({"complete": not dockerfile_warnings} if dockerfile_warnings is not None else {}),
         },
     }
     if blocking is not None:
@@ -1205,6 +1208,49 @@ def dockerfile_report_notes(
             "into: any Python packages they install are not in this answer."
         )
     return notes, warnings, unseen
+
+
+# The dockerfile_notes kinds that qualify the whole answer (what the image is), shown in every output: --markdown,
+# --github-annotations and --sarif as well as stderr and --json.
+IMAGE_NOTE_KINDS = ("image-not-read", "image-libc")
+
+
+def dockerfile_results(
+    notes: list[dict[str, object]],
+    warnings: list[dict[str, object]] = [],  # noqa: B006 (only read)
+) -> list[tuple[str, str, int | None, str]]:
+    """(level, Dockerfile, line, message) for each Dockerfile note and warning that every output shows: the notes on
+    the image, then the warnings on lines --dockerfile-inputs couldn't see into."""
+    return [
+        (
+            level,
+            str(entry["dockerfile"]),
+            entry["line"] if isinstance(entry["line"], int) else None,
+            str(entry["message"]),
+        )
+        for level, entries in (("note", notes), ("warning", warnings))
+        for entry in entries
+        if level == "warning" or entry["kind"] in IMAGE_NOTE_KINDS
+    ]
+
+
+def dockerfile_markdown(results: list[tuple[str, str, int | None, str]]) -> list[str]:
+    """--markdown's lines for dockerfile_results: a quoted line each, after the report."""
+    lines = []
+    for level, file, line, message in results:
+        where = file if line is None else f"{file}:{line}"
+        lines += ["", f"> **{level.capitalize()}:** {_md(where)}: {_md(message)}"]
+    return lines
+
+
+def unseen_lines(lines: list[int]) -> str:
+    """`line 8 wasn't seen into`: the Dockerfile lines a --dockerfile-inputs answer doesn't cover."""
+    return f"{_line_list(lines)} {'was' if len(lines) == 1 else 'were'}n't seen into"
+
+
+def read_packages(count: int) -> str:
+    """`The 3 packages wheelgap read have`: a headline that says the answer is for what was read, not the image."""
+    return f"The {count} package{'s' * (count != 1)} wheelgap read {'has' if count == 1 else 'have'}"
 
 
 def libc_versions(args: argparse.Namespace, config: dict) -> tuple[str, str]:
@@ -1397,18 +1443,30 @@ def render_markdown(
     issues_urls: dict[int, str | None] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
     fix_hint: str | None = None,
+    unseen: list[int] | None = None,
 ) -> list[str]:
-    """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
+    """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment).
+    `unseen` lists the Dockerfile lines --dockerfile-inputs couldn't see into: the headline then says so."""
     plain = Style(False)
     gaps = [r for r in rows if not r.ok]
     total_pkgs = len(_group_rows(rows))
     gap_pkgs = len(_group_rows(gaps))
     n_t = len(targets)
+    not_seen = f"; {unseen_lines(unseen)}" if unseen else ""
     if gaps:
         noun = "package" if total_pkgs == 1 else "packages"
-        out = [f"### wheelgap: {gap_pkgs} of {total_pkgs} {noun} {'has' if gap_pkgs == 1 else 'have'} gaps", ""]
+        out = [
+            f"### wheelgap: {gap_pkgs} of {total_pkgs} {noun} {'has' if gap_pkgs == 1 else 'have'} gaps{not_seen}",
+            "",
+        ]
     elif not rows:  # "every package" reads like a success when the run checked nothing
         out = ["### wheelgap: no packages to check", ""]
+    elif unseen:
+        out = [
+            f"### wheelgap: {read_packages(total_pkgs)} a wheel for {'all ' if n_t > 1 else ''}{n_t} "
+            f"target{'s' * (n_t > 1)}{apart_from_ignored(rows)}{not_seen}",
+            "",
+        ]
     else:
         out = [
             f"### wheelgap: every package has a wheel for {'all ' if n_t > 1 else ''}{n_t} target{'s' * (n_t > 1)}"
@@ -2037,6 +2095,17 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             # Before the RUN lines are read: an image that needs -p/-t is the first thing to say, not the last.
             read_image()
             context = Path(args.dockerfile_context) if args.dockerfile_context else None
+            # The Pythons the check is for, which a `python3.11 -m pip` or a venv's Python must be.
+            try:
+                docker_pythons = [
+                    f"{major}.{minor}{'t' * threaded}"
+                    for item in args.python
+                    for value in item.split(",")
+                    if value.strip()
+                    for major, minor, threaded in [parse_python(value)]
+                ]
+            except TargetError:
+                docker_pythons = []  # reported when the targets are built
             installs = dockerfile_requirements(
                 Path(args.dockerfile),
                 build_args,
@@ -2046,6 +2115,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 dependencies=args.deps,
                 uv_installs=uv_installs,
                 report=inputs_report,
+                pythons=docker_pythons or ([image.python] if image is not None else None),
             )
             args.inputs = [str(requirements) for _, requirements in installs]
         if args.clear_cache:
@@ -2082,8 +2152,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 reason = str(unknown_image).removeprefix(f"{args.dockerfile}: ").removesuffix(", pass -p/-t instead")
                 message = (
                     f"the final image isn't read ({reason}), so this run checks the -p and -t given. Not known from "
-                    "the Dockerfile: which Python the image's pip installs for, its glibc or musl version"
-                    f"{libc}, and the packages the image already has"
+                    "the Dockerfile: which Python the image's pip installs for and which pip version it has, its "
+                    f"glibc or musl version{libc}, the packages the image already has, its own pip settings "
+                    "(ENV PIP_..., a pip.conf, a constraints file) and any ONBUILD instructions it runs in this build"
                 )
                 where = args.dockerfile if unknown_image.line is None else f"{args.dockerfile}:{unknown_image.line}"
                 print(f"wheelgap: note: {where}: {message}", file=sys.stderr)
@@ -2164,6 +2235,23 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             args.ios or config.get("ios", DEFAULT_IOS),
             args.android_api or config.get("android-api", DEFAULT_ANDROID_API),
         )
+        if unknown_image is not None and (image_tag := unknown_image.image) and re.search(r"alpine|musl", image_tag):
+            if glibc_targets := [t.platform for t in targets if t.platform.startswith("linux-")]:
+                # The tag isn't read, but it says musl: glibc targets are likely not what the image installs for.
+                message = (
+                    f"{image_tag} looks like an Alpine (musl) image, and glibc targets are checked "
+                    f"({', '.join(dict.fromkeys(glibc_targets))}): pass -t musl-... if the image uses musl"
+                )
+                where = args.dockerfile if unknown_image.line is None else f"{args.dockerfile}:{unknown_image.line}"
+                print(f"wheelgap: note: {where}: {message}", file=sys.stderr)
+                dockerfile_notes.append(
+                    {
+                        "dockerfile": args.dockerfile,
+                        "line": unknown_image.line,
+                        "kind": "image-libc",
+                        "message": message,
+                    }
+                )
         if not quiet and (resolved := next_python_note(pythons)):
             print(f"wheelgap: note: {resolved}", file=sys.stderr)
         ignore_how = "--ignore" if args.ignore else "ignore in [tool.wheelgap]"
@@ -2804,14 +2892,29 @@ def _main(argv: list[str], project: Path | None = None) -> int:
 
     if args.junit is not None:  # an empty PATH (an unset CI variable) is an error, not "no report"
         try:
-            write_junit(args.junit, rows, targets, fail_on, advisory)
+            write_junit(
+                args.junit,
+                rows,
+                targets,
+                fail_on,
+                advisory,
+                [f"{file}:{line}: {message}" for _, file, line, message in dockerfile_results([], dockerfile_warnings)],
+            )
         except OSError as e:
             print(f"wheelgap: error: {e}", file=sys.stderr)
             return input_error_json(e) if args.json else 2
 
     if args.sarif is not None:  # an empty PATH is an error, as for --junit
         try:
-            write_sarif(args.sarif, rows, targets, sources, fail_on, advisory)
+            write_sarif(
+                args.sarif,
+                rows,
+                targets,
+                sources,
+                fail_on,
+                advisory,
+                dockerfile_results(dockerfile_notes, dockerfile_warnings),
+            )
         except OSError as e:
             print(f"wheelgap: error: {e}", file=sys.stderr)
             return input_error_json(e) if args.json else 2
@@ -2857,6 +2960,12 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             else None
         )
         for command in github_annotations(rows, targets, sources, failing, advisory, fills, installed_by=installed_by):
+            write_command(command, sys.stderr if args.json or args.markdown else sys.stdout)
+        for level, file, at_line, message in dockerfile_results(dockerfile_notes, dockerfile_warnings):
+            at_path = relative_path(Path(file))
+            command = workflow_command(
+                "notice" if level == "note" else level, message, at_path, at_line if at_path else None, "wheelgap"
+            )
             write_command(command, sys.stderr if args.json or args.markdown else sys.stdout)
 
     if args.json:
@@ -2926,9 +3035,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         issues_urls=issues_urls,
                         pi_wheels=pi_wheels,
                         fix_hint=fix_hint,
+                        unseen=sorted({int(str(entry["line"])) for entry in dockerfile_warnings}),
                     ),
                     *gapwheels.markdown_lines(fills or [], multi_py),
                     *(["", f"> **Warning:** {unseen_line}"] if unseen_line else []),
+                    *dockerfile_markdown(dockerfile_results(dockerfile_notes)),
                 ]
             )
         )
@@ -3034,9 +3145,13 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not gaps:
         what = "The 1 package has" if total_pkgs == 1 else f"All {total_pkgs} packages have"
         every = f"{'every one of ' if n_t > 1 else ''}{n_t} target{'s' * (n_t > 1)}{apart_from_ignored(rows)}"
-        print(style.green(f"✓ {what} a wheel for {every}."))
         if unseen_line:
+            # Not a green tick: the answer is for the install lines read, and some lines weren't seen into.
+            lines = sorted({int(str(entry["line"])) for entry in dockerfile_warnings})
+            print(style.yellow(f"! {read_packages(total_pkgs)} a wheel for {every}; {unseen_lines(lines)}."))
             print(style.yellow(f"! {unseen_line}"))
+        else:
+            print(style.green(f"✓ {what} a wheel for {every}."))
         return code
 
     for line in target_lines(gaps, targets, style, advisory):

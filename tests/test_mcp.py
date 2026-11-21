@@ -3498,3 +3498,10 @@ def test_modern_relative_context_asks_the_client_for_its_roots(fake_pypi, tmp_pa
     (reply,) = run(message)
     data = reply["result"]["structuredContent"]
     assert data["path"] == str(root.resolve()) and [g["name"] for g in data["gaps"]] == ["winonly"]
+
+
+def test_check_dockerfile_description_says_where_unseen_lines_are():
+    from wheelgap.mcp import TOOLS
+
+    [tool] = [tool for tool in TOOLS if tool["name"] == "check_dockerfile"]
+    assert "'dockerfile_warnings'" in tool["description"] and "summary.complete false" in tool["description"]

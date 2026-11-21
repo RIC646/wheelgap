@@ -5,9 +5,9 @@ report, a `pyproject.toml`, a script with a `# /// script` block, directories, o
 With no input it reads the current directory.
 
 ```bash
-wheelgap                          # the lockfile in the current directory
+wheelgap                          # the current directory: its lockfile, or what it has instead
 wheelgap uv.lock                  # one file
-wheelgap services/api services/worker   # the lockfile in each directory
+wheelgap services/api services/worker   # the same for each directory
 wheelgap psycopg2 numpy==2.3.4    # package names, with or without a version
 ```
 
@@ -36,9 +36,61 @@ needs no index lookup (except when its `requires-python` leaves out a Python you
 A **directory** is searched for, in this order, `uv.lock`, `pylock.toml`, `poetry.lock`, `pdm.lock`,
 `Pipfile.lock`, `requirements.txt`, `requirements.lock` and `pixi.lock`, and the first one found is read.
 `--environment` makes a directory's `pixi.lock` the one read, and when a directory has `pixi.lock`
-next to another lockfile, a note on stderr names the `pixi.lock` it passed over. A directory with none of them is an
-error; if it has a `pyproject.toml` with a `[project]` table, the error suggests checking that file
-instead. wheelgap doesn't switch to `pyproject.toml` on its own.
+next to another lockfile, a note on stderr names the `pixi.lock` it passed over.
+
+In a directory with none of those names, wheelgap looks further (after 0.13.0; before, this was an error). Each step
+is tried only if the one before found nothing, a note on stderr says which file was checked and why (also with
+`--quiet`), and `--json` has it in [`directory_inputs`](output.md#json):
+
+1. **`pyproject.toml`** at the root, if it has a `[project]` table that lists dependencies or extras. It is checked as
+   [`wheelgap pyproject.toml`](#pyprojecttoml) checks it: the direct dependencies only, with the usual note that says
+   so and names `--deps`.
+2. **A requirements file under another name** at the root: `requirements*.txt` or `requirements*.in`, or a `.txt` or
+   `.in` file in `requirements/` (not a `.in` next to the `.txt` compiled from it, and not a name that starts, in
+   any case, with `constraint`, `readme`, `license`, `licence`, `copying`, `notice`, `changelog`, `changes`,
+   `history`, `authors`, `contributing`, `todo` or `notes`). If there
+   is exactly one, it is checked. If there are several, wheelgap doesn't choose: it exits 2 and lists each as a
+   command to run (`wheelgap requirements/base.txt`).
+3. **An input in a subfolder**, up to 3 folders down (`backend/requirements.txt`, `services/api/uv.lock`): for each
+   folder, the file `wheelgap FOLDER` would read (the first lockfile name above, else a `pyproject.toml` that lists
+   `[project]` dependencies). Hidden folders, `node_modules`, `site-packages`, `__pycache__` and virtualenvs aren't
+   searched, symlinks aren't followed, and the search opens at most 2000 folders. If there is exactly one, it is
+   checked as `wheelgap FOLDER` checks that folder (so a `requirements.txt` there with nothing to check gives way to
+   the folder's `pyproject.toml`), and the header, `--markdown` and `--json`'s `sources` name it by its path in the
+   directory (`scripts/requirements.txt`), since a bare `requirements.txt` would read as the root's. Several are
+   listed as commands (the first 10, then a count) with exit code 2. So is the one input when another requirements
+   file could as well be the project's: one under another name beside a subfolder's `requirements.txt`
+   (`docker/main/requirements-wheels.txt`), or a `requirements-dev.txt` at the root.
+
+wheelgap only checks a file on its own when it can take it for the project's dependencies. So these are listed as
+a command to run (exit 2) instead of being checked, even when there is only one:
+
+- a requirements file or a folder whose name says it is for development, tests, docs or examples: a name with
+  one of these words in it, set off by `-`, `_`, `.` or the name's ends: `dev`, `develop`, `development`, `test`,
+  `tests`, `testing`, `doc`, `docs`, `example`, `examples`, `sample`, `samples`, `demo`, `demos`, `bench`,
+  `benchmark`, `benchmarks`, `lint`, `ci`, `typing`, `fixtures`, `templates`; as in `requirements-dev.txt`,
+  `docs/requirements.txt` or `e2e_tests/uv.lock` (but not `devtools/`). Such folders are only looked at when no other subfolder has an
+  input;
+- the one input in a subfolder, when the root is a project itself: it has a `setup.py`, a `setup.cfg`, or a
+  `pyproject.toml` with a `[project]` table, a `[build-system]` table or Poetry dependencies. The project's own
+  dependencies are at the root, where wheelgap couldn't read any, not in the subfolder;
+- anything found by a search that didn't see every folder: it stopped at 2000 folders, or a folder couldn't be
+  read.
+
+A `pyproject.toml` with a `[project]` table that lists nothing is the answer (`No packages to check.`, exit 0) when
+step 2 finds no requirements file and step 3 no subfolder input, leaving aside those whose name says development,
+tests, docs or examples. A directory where nothing is found at all is an error that says what was looked for, and
+why its `pyproject.toml` couldn't be checked if it has one.
+
+**A file with nothing to check** (after 0.13.0): when the first lockfile found lists no package from an index (a
+`requirements.txt` that only says `.`, a `pixi.lock` with conda packages only, a `uv.lock` with only the project
+itself), wheelgap reads the next of the names above that has one, then the root's `pyproject.toml`, and a note says
+which file it passed over and why. If none has anything either, the first file is read as before. With
+`--environment`, the `pixi.lock` is read whatever it holds.
+
+The files a directory already had an answer from are read as before: the order of the names above hasn't changed, and
+a root file always comes before a subfolder's. The Python API's `check_lockfile()` and `wheelgap diff` have no notes
+to say which file they picked, so they still read a directory's lockfile by name only.
 
 A **file** is read by its name:
 

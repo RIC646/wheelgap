@@ -67,6 +67,8 @@ from .pypi import (
 )
 from .sarif import write_sarif
 from .sources import (
+    DirectoryChoiceError,
+    DirectoryInput,
     Package,
     Source,
     SourceError,
@@ -1001,6 +1003,7 @@ def report_json(
     gap_wheels: list[gapwheels.Fill] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
     dockerfile_inputs: list[dict[str, str | int]] | None = None,
+    directory_inputs: list[dict[str, object]] | None = None,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     gaps = [r for r in rows if not r.ok]
@@ -1112,6 +1115,8 @@ def report_json(
         report["gap_wheels"] = gapwheels.to_json(gap_wheels, multi_py)
     if dockerfile_inputs is not None:
         report["dockerfile_inputs"] = dockerfile_inputs
+    if directory_inputs:  # an input was a directory: the file read from each, and why
+        report["directory_inputs"] = directory_inputs
     return json.dumps(report, indent=2)
 
 
@@ -1454,9 +1459,52 @@ def split_ignore_value(value: str, how: str, docker_musl: bool) -> list[tuple[st
     return out
 
 
+def directory_notes(found: DirectoryInput) -> list[str]:
+    """What to say when a directory's input isn't simply its first lockfile: which file was read, and why."""
+    passed = "; ".join(f"{path} has {why}" for path, why in found.empty)
+    instead = [f"{passed}, so {found.path} was checked instead"] if found.empty else []
+    if found.reason == "subfolder":
+        return [
+            f"no lockfile, requirements.txt or pyproject.toml dependencies at the root of {found.directory}, so the "
+            f"only input in its subfolders, {found.path.parent if found.empty else found.path}, was checked",
+            *instead,
+        ]
+    if found.empty:
+        return instead
+    if found.reason == "pyproject":
+        return [f"no lockfile or requirements.txt in {found.directory}, so {found.path} was checked"]
+    if found.reason == "requirements":
+        return [
+            f"no lockfile, requirements.txt or pyproject.toml dependencies in {found.directory}, so its only "
+            f"requirements file, {found.path}, was checked"
+        ]
+    return []
+
+
+def directory_inputs_json(sources: list[Source]) -> list[dict[str, object]]:
+    """--json's directory_inputs: for each directory input, the file that was read and why."""
+
+    def relative(found: DirectoryInput, path: Path) -> str:
+        return path.relative_to(found.directory).as_posix()
+
+    return [
+        {
+            "directory": str(found.directory),
+            "file": relative(found, found.path),
+            "reason": found.reason,
+            "empty": [{"file": relative(found, path), "why": why} for path, why in found.empty],
+        }
+        for source in sources
+        if (found := source.found) is not None
+    ]
+
+
 def input_error_json(e: Exception) -> int:
     """With --json, also put an input error on stdout so scripts don't have to parse stderr."""
-    print(json.dumps({"error": {"message": str(e), "type": type(e).__name__}}))
+    error: dict[str, object] = {"message": str(e), "type": type(e).__name__}
+    if isinstance(e, DirectoryChoiceError):  # the files to choose from, as the message lists them
+        error["candidates"] = [str(path) for path in e.candidates]
+    print(json.dumps({"error": error}))
     return 2
 
 
@@ -2087,6 +2135,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             )
         for source in sources:
             check_report_targets(source, targets)
+            if source.found is not None:
+                for line in directory_notes(source.found):  # always: the file read isn't the one the name promises
+                    print(f"wheelgap: note: {line}", file=sys.stderr)
             if source.passed_over is not None and not quiet:
                 print(
                     f"wheelgap: note: {source.path} was checked; {source.passed_over} is in the same folder too "
@@ -2721,6 +2772,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 ]
                 if args.dockerfile_inputs
                 else None,
+                directory_inputs=directory_inputs_json(sources),
             )
         )
         return code

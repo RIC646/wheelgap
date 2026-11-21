@@ -2333,6 +2333,23 @@ def test_requirements_options_pip_ignores_after_a_requirement(tmp_path, line, ig
     ]
 
 
+def test_requirements_format_option_is_read_only_where_pip_reads_it(tmp_path):
+    # pip 26.3: `-f --only-binary` makes "--only-binary" -f's value and sets "nowheels" aside, so only fastlib is
+    # binary-only; a -C value that looks like an option is a config setting.
+    req = tmp_path / "requirements.txt"
+    req.write_text(
+        "fastlib==2.0.0 --only-binary fastlib -f --only-binary nowheels\n"
+        "purewheel==3.1 -C --no-binary=purewheel\nnowheels==0.9\n",
+        encoding="utf-8",
+    )
+    source = parse_requirements(req)
+    assert [(p.name, p.no_binary, p.only_binary) for p in source.packages] == [
+        ("fastlib", False, True),
+        ("purewheel", False, False),
+        ("nowheels", False, False),
+    ]
+
+
 def test_requirements_constraints_after_a_requirement_are_not_read(tmp_path):
     # pip 26.3 installs the newest release for `fastlib -c cons.txt` and never opens cons.txt.
     (tmp_path / "cons.txt").write_text("fastlib==1.0\n", encoding="utf-8")
@@ -2399,6 +2416,11 @@ def test_conda_env_pip_list_ignored_option_note(tmp_path):
             "requirements.txt:2: pip refuses this line: option --use-feature: invalid choice: 'nope'",
         ),
         ("fastlib>=2 --no-binary 'fastlib", "requirements.txt:2: pip can't split this line (an unclosed quote?)"),
+        # pip's parser callbacks refuse these values (pip 26.3 ran).
+        ("fastlib>=2 --no-binary --pre", "requirements.txt:2: pip refuses this line: --no-binary / --only-binary"),
+        ("fastlib>=2 --hash=abc", "requirements.txt:2: pip refuses this line: Arguments to --hash must be a hash"),
+        ("fastlib>=2 --hash=md5:abc", "requirements.txt:2: pip refuses this line: Allowed hash algorithms for --hash"),
+        ("fastlib>=2 -C foo", "requirements.txt:2: pip refuses this line: Arguments to -C must be of the form KEY=VAL"),
         # pip makes the requirement itself editable, and refuses a name: "fastlib>=2 is not a valid editable
         # requirement".
         ("fastlib>=2 -e .", "requirements.txt:2: pip reads -e after a requirement as making that requirement"),

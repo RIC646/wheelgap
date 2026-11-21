@@ -2314,10 +2314,11 @@ _LONG_LINE_OPTIONS = {name: entry for entry in _REQUIREMENT_LINE_OPTIONS for nam
 _SHORT_LINE_OPTIONS = {name: entry for entry in _REQUIREMENT_LINE_OPTIONS for name in entry[0] if len(name) == 2}
 
 
-def _requirement_options(text: str, where: str) -> tuple[bool, bool, list[tuple[str, str]]]:
+def _requirement_options(text: str, where: str) -> tuple[bool, list[tuple[str, str]], list[tuple[str, str]]]:
     """Reads the options after a requirement (`name>=1 --no-binary name`) as pip's optparse reads them: long options
-    by any unambiguous prefix, `--opt=value`, `-fVALUE`. Returns whether there's a --hash, whether there's a
-    --no-binary or --only-binary for _apply_format_options, and what pip ignores there, for a note: each option as
+    by any unambiguous prefix, `--opt=value`, `-fVALUE`. Returns whether there's a --hash, each --no-binary or
+    --only-binary as (long name, value) in order, for the install's format control, and what pip ignores there, for
+    a note: each option as
     (the name it was written with, its long name), and words that aren't options, which optparse sets aside, as one
     entry. SourceError where pip refuses
     the line, or where it applies an option that wheelgap doesn't read."""
@@ -2326,7 +2327,8 @@ def _requirement_options(text: str, where: str) -> tuple[bool, bool, list[tuple[
     except ValueError:
         raise SourceError(f"{where}: pip can't split this line (an unclosed quote?): {text}") from None
     refused = f"{where}: pip refuses this line:"
-    hashed = formats = False
+    hashed = False
+    formats: list[tuple[str, str]] = []
     ignored: list[tuple[str, str]] = []
     k = 0
     while k < len(tokens):
@@ -2365,6 +2367,18 @@ def _requirement_options(text: str, where: str) -> tuple[bool, bool, list[tuple[
                 raise SourceError(f"{refused} {name} option requires 1 argument")
             value = tokens[k]  # optparse takes the next word, even one that starts with "-"
             k += 1
+        given_value = value or ""
+        # The checks pip's parser callbacks make (the first is a CommandError, the others optparse errors).
+        if kind == "format" and given_value.startswith("-"):
+            raise SourceError(f"{refused} --no-binary / --only-binary option requires 1 argument.")
+        if kind == "hash" and ":" not in given_value:
+            raise SourceError(
+                f"{refused} Arguments to --hash must be a hash name followed by a value, like --hash=sha256:abcde..."
+            )
+        if kind == "hash" and given_value.split(":", 1)[0] not in ("sha256", "sha384", "sha512"):
+            raise SourceError(f"{refused} Allowed hash algorithms for --hash are sha256, sha384, sha512.")
+        if kind == "requirement" and "=" not in given_value:
+            raise SourceError(f"{refused} Arguments to {name} must be of the form KEY=VAL")
         if kind == "feature" and value not in _USE_FEATURE_CHOICES:
             raise SourceError(f"{refused} option --use-feature: invalid choice: {value!r}")
         if kind == "editable":
@@ -2380,7 +2394,8 @@ def _requirement_options(text: str, where: str) -> tuple[bool, bool, list[tuple[
         if kind == "ignored":
             ignored.append((name, names[-1]))  # -f and --find-links are one option
         hashed = hashed or kind == "hash"
-        formats = formats or kind == "format"
+        if kind == "format" and given_value:
+            formats.append((name, given_value))  # the value pip's callback reads, never a word after another option
     return hashed, formats, ignored
 
 
@@ -2535,10 +2550,11 @@ def _read_requirements(
                     for shown, option in ignored:
                         note = f"{where}: pip ignores {shown} after a requirement"
                         ignored_options.setdefault((resolved, option), note)
-                if formats and format_control is not None:
+                if format_control is not None:
                     # Each time the line is read, as for an option line: pip reads a file included twice twice,
                     # and the later option wins.
-                    _apply_format_options(options, format_control)
+                    for format_option, format_value in formats:
+                        format_control.apply(format_option, format_value)
             if already_seen:
                 continue
             # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.

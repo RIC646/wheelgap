@@ -400,7 +400,8 @@ too and says so on stderr, once per file and option (`-q` drops it):
 `wheelgap: note: requirements.txt:2: pip ignores -f after a requirement`. To use another index or folder, put the
 option on a line of its own. `--use-feature` is accepted without a note, since no feature changes which file pip
 picks. The rest is an input error that names the file and line: an option pip doesn't have, an ambiguous
-abbreviation or a missing value (pip refuses the line too); `-e` (pip reads it as making the requirement itself
+abbreviation, a missing value or one pip's parser refuses (`--hash=abc`, `-C foo`, `--no-binary --pre`)
+(pip refuses the line too); `-e` (pip reads it as making the requirement itself
 editable, and refuses that for a name); and `--all-releases` / `--only-final`, which pip applies to the whole install
 and wheelgap doesn't read.
 

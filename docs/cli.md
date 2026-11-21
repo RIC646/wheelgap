@@ -186,8 +186,13 @@ any other package. These stop, naming the line:
 - `-c FILE` together with names, and `--prefer-binary` with a name that isn't pinned.
 
 An unquoted `uvicorn[standard]` is a glob to the shell, which leaves it as written unless the working folder has a
-file named like the requirement with one letter of the extras in place of the brackets (`uvicorns`); wheelgap reads
-it as the requirement it spells.
+file named like the requirement with one letter of the extras in place of the brackets (`uvicorns`), and then pip
+installs that file's name. wheelgap reads it as the requirement it spells only when it can tell that no such name is
+there: the folder is one the Dockerfile made (not `/`, `/usr/…` or another folder of the base image), the image is
+one wheelgap read, and no `COPY` from the build context, `WORKDIR`, or unread command before the install may put a
+matching name in it. Otherwise it stops, naming what may match; quote it (`'uvicorn[standard]'`) and it is read
+whatever the folder holds. A path with brackets (`./pkg[dev]`, `-e ./pkg[dev]`) stops as a project folder or an
+editable install.
 
 A `-r` or `-c` inside `FILE` (and inside the file it names, and so on) is an error in 0.13.0. **After 0.13.0** it is
 followed when the included file is in the image where pip looks for it, and the same holds inside a constraints file

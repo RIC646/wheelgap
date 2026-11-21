@@ -3372,7 +3372,7 @@ _ANOTHER_INDEX = (
         ("pip install .", ":4: pip install \\.: a project folder or a file is installed here"),
         ("pip install ./pkg", ":4: pip install \\./pkg: a project folder or a file"),
         ("pip install '.[mcp]'", ":4: pip install \\.\\[mcp\\]: a project folder or a file"),
-        ("pip install /src[qdrant,local]", ":4: .*/src\\[qdrant,local\\] isn't a value"),
+        ("pip install /src[qdrant,local]", ":4: pip install /src\\[qdrant,local\\]: a project folder or a file"),
         ("pip install dist/app-1.0-py3-none-any.whl", ":4: pip install dist/app-1.0-py3-none-any.whl: a project"),
         ("pip install app-1.0-py3-none-any.whl", ":4: pip install app-1.0-py3-none-any.whl: a project folder or"),
         ("pip install app-1.0.tar.gz six", ":4: pip install app-1.0.tar.gz: a project folder or a file"),
@@ -3820,3 +3820,56 @@ def test_cli_dockerfile_inputs_warnings_cant_be_missed(tmp_path, capsys, fake_py
     assert json.loads(capsys.readouterr().out)["summary"]["complete"] is True
     assert main(argv) == 0
     assert "✓ The 1 package has a wheel" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("head", "files", "run", "error"),
+    [
+        # The shell expands an unquoted six[a] to a file named sixa if the folder has one, and pip installs that.
+        (
+            "WORKDIR /app\nCOPY . .\n",
+            ["sixa"],
+            "pip install six[a]",
+            ":4: six\\[a\\] is a glob .* COPY on line 3 puts sixa",
+        ),
+        ("WORKDIR /app\nCOPY sixa .\n", ["sixa"], "pip install six[a]", "COPY on line 3 puts sixa in /app"),
+        ("WORKDIR /app\nCOPY src/ ./\n", ["src/sixa"], "pip install six[a]", "puts sixa in /app"),
+        ("WORKDIR /app/sixa\nWORKDIR /app\n", [], "pip install six[a]", "a WORKDIR puts sixa in /app"),
+        ("WORKDIR /app\n", [], "mkdir sixa && pip install six[a]", "line 3 may put files in /app"),
+        ("WORKDIR /app\n", [], "git clone https://example.test/x . && pip install six[a]", "may put files in /app"),
+        # Where the folder's contents aren't known, it isn't read either.
+        ("", [], "pip install six[a]", "the folder it runs in isn't known"),
+        ("WORKDIR /usr/src/app\n", [], "pip install six[a]", "/usr/src/app is a folder of the image"),
+        ("WORKDIR /\n", [], "pip install six[a]", "/ is a folder of the image"),
+        # Paths with brackets are a project folder or an editable install, not a glob to wheelgap.
+        ("WORKDIR /app\n", [], "pip install ./x[dev]", "pip install ./x\\[dev\\]: a project folder or a file"),
+        ("WORKDIR /app\n", [], "pip install -e ./x[dev]", "pip install -e ./x\\[dev\\]: an editable install"),
+        ("WORKDIR /app\n", [], "pip install --editable=./x[dev]", "an editable install of a project folder"),
+        # ENV then ARG: BuildKit's RUN sees the ARG's value, the classic builder's the ENV's.
+        ("ENV VER=1.15.0\nARG VER=1.16.0\n", [], "pip install six==$VER", "VER is set by an ENV and then by the ARG"),
+    ],
+)
+def test_dockerfile_requirements_name_globs_and_paths(tmp_path, head, files, run, error):
+    for name in files:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=error):
+        _named(tmp_path, f"RUN {run}\n", head=f"FROM python:3.13\n{head}")
+
+
+@pytest.mark.parametrize(
+    ("head", "run", "names"),
+    [
+        # No file in the folder matches: the word is the requirement it spells.
+        ("WORKDIR /app\nCOPY requirements.txt .\n", "pip install six[a]", ["six[a]"]),
+        ("WORKDIR /app\nCOPY . .\n", "pip install uvicorn[standard]", ["uvicorn[standard]"]),
+        ("WORKDIR /app\n", "pip install 'six[a]'", ["six[a]"]),  # quoted: never a glob
+        ("WORKDIR /app\nRUN mkdir -p /data/sixa\n", "pip install six[a]", ["six[a]"]),
+        # ARG then ENV, or an ARG with no value after an ENV: every builder gives the ENV's value.
+        ("ARG VER=1.16.0\nENV VER=1.15.0\n", "pip install six==$VER", ["six==1.15.0"]),
+        ("ENV VER=1.15.0\nARG VER\n", "pip install six==$VER", ["six==1.15.0"]),
+    ],
+)
+def test_dockerfile_requirements_reads_names_no_file_can_match(tmp_path, head, run, names):
+    _, report = _named(tmp_path, f"RUN {run}\n", head=f"FROM python:3.13\n{head}")
+    assert report.named == [(head.count("\n") + 2, names, False)]

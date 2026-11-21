@@ -1166,6 +1166,39 @@ def _copies_config(copy: _Copy, names: tuple[str, ...]) -> bool:
     return names == _PIP_CONFIG_NAMES and (copy.dest + "/").startswith(_PIP_CONFIG)
 
 
+# Folders of the base image's own file tree, whose contents a Dockerfile doesn't show.
+_IMAGE_FOLDERS = frozenset(
+    "bin boot dev etc home lib lib32 lib64 libx32 media mnt opt proc root run sbin srv sys tmp usr var".split()
+)
+
+
+def _names_in_folder(copies: list[_Copy], dirs: set[str], folder: str) -> list[tuple[str, int | None]]:
+    """(name, the COPY line or None for a WORKDIR) of every entry the instructions so far may put directly in
+    `folder` of the image: what each COPY from the build context brings there (a folder's entries listed on disk,
+    whatever the ignore rules leave out), and the folders WORKDIR and COPY made below it."""
+    names: list[tuple[str, int | None]] = []
+    for path in dirs:
+        if path.startswith(folder.rstrip("/") + "/"):
+            names.append((path[len(folder.rstrip("/")) + 1 :].split("/")[0], None))
+    for copy in copies:
+        if copy.error:
+            continue
+        names += [(binary, copy.line) for binary in copy.uv_binaries if copy.dest == folder]
+        for rel, host, is_dir in copy.sources:
+            landed = posixpath.join(copy.dest, posixpath.basename(rel)) if copy.into else copy.dest
+            if is_dir:
+                landed = copy.dest  # a folder's contents land in dest
+                inside = (
+                    posixpath.relpath(folder, landed) if (folder + "/").startswith(landed.rstrip("/") + "/") else None
+                )
+                if inside is not None and (host / inside).is_dir():
+                    names += [(entry, copy.line) for entry in os.listdir(host / inside)]
+                    continue
+            if landed.startswith(folder.rstrip("/") + "/"):
+                names.append((landed[len(folder.rstrip("/")) + 1 :].split("/")[0], copy.line))
+    return names
+
+
 def _requirement_includes(host: Path, number: int) -> list[tuple[bool, str]]:
     """The files a requirements or constraints file includes with -r or -c, as (whether it's a -c, the path as
     written), found on the same lines and with the same reader (`_line_include`) as `_read_requirements` in
@@ -1823,6 +1856,8 @@ class _Install:
     seen: int = 0  # how many of the reader's mentions come before it
     unseen: int = 0  # how many lines wheelgap can't see into come before it (InputsReport.unseen)
     mounts: tuple[str, ...] = ()  # the folders a cache or tmpfs mount covers while it runs
+    globs: tuple[str, ...] = ()  # unquoted `name[extra]` words, which the shell expands if a file in cwd matches
+    created: int = 0  # how many of the reader's `created` come before it
 
 
 def _requirement_name(text: str) -> str | None:
@@ -1855,6 +1890,8 @@ class _RunReader:
         # (line, word, folder) for each word of a command that wasn't read and may name a file it writes.
         self.mentions: list[tuple[int, str, str | None]] = []  # with the folder the command ran in, if known
         self.config_error: str | None = None  # a command that may have written a pip or uv config file
+        # (line, word, folder) for each word of a mkdir, touch, ln or install that wasn't read: names it may create.
+        self.created: list[tuple[int, str, str | None]] = []
 
     def read(
         self,
@@ -2038,6 +2075,7 @@ class _RunReader:
                         )
                         self.report.notes.append((number, "arg-value", f"this install uses {how}"))
                 detail.unseen, detail.mounts = len(self.report.unseen), tuple(covered)
+                detail.created = len(self.created)
                 if unknown_mount:
                     stop(f"{unknown_mount}, and it may hide the requirements file or put a pip config file in place")
                 if config := next((folder for folder in covered if _config_folder(folder)), None):
@@ -2076,6 +2114,8 @@ class _RunReader:
                     written.append(folder if folder.startswith("/") or cwd is not None else "/")
                     anywhere = folder == "/"  # git: any file of the work tree, which the config check leaves out
             self.mentions += [(number, text, cwd) for text in written]
+            if first in ("mkdir", "touch", "ln", "install"):
+                self.created += [(number, word.text, cwd) for word in words[1:] if not word.text.startswith("-")]
             for text in (written[:-1] if anywhere else written) if kind not in ("install", "pip", "venv") else ():
                 folder = posixpath.normpath(posixpath.join(cwd or "/", text)) if text.startswith("/") or cwd else ""
                 if _names_config(text):
@@ -2369,10 +2409,19 @@ class _RunReader:
         if subcommand != "install":
             stop(f"`{shown}`: only `install` is read of {tool}'s commands, and this one may change what is installed")
         # An unquoted name[extra] is a glob to the shell, which leaves it as written unless a file of that very
-        # shape (the name plus one letter of the extras) is in the folder: read as the requirement it spells.
-        args = [
-            _Word(word.text) if word.brackets and _requirement_name(word.text) is not None else word for word in args
-        ]
+        # shape (the name plus one letter of the extras) is in the folder: read as the requirement it spells, once
+        # read_install has checked that the folder holds no such file (_Install.globs).
+        for i, word in enumerate(args):
+            if word.brackets and _requirement_name(word.text) is None and ("/" in word.text or word.text[:1] == "."):
+                if word.text.startswith(("-e", "--editable")) or (i and args[i - 1].text in ("-e", "--editable")):
+                    stop(
+                        f"{tool} install -e {word.text.removeprefix('--editable=').removeprefix('-e')}: an editable "
+                        "install of a project folder isn't read by --dockerfile-inputs yet: only requirements files "
+                        "and requirements by name are"
+                    )
+                _command_line_requirement(number, tool, word.text)  # a project folder or a file: says so
+        globs = tuple(word.text for word in args if word.brackets and _requirement_name(word.text) is not None)
+        args = [_Word(word.text) if word.text in globs else word for word in args]
         if unknown := next((word for word in args if not word.exact), None):
             if both := next((name for name in self.ambiguous if re.search(rf"\$\{{?{name}\b", unknown.text)), None):
                 stop(
@@ -2394,7 +2443,7 @@ class _RunReader:
                 return "warning", f"`{shown}`, which installs a pip version wheelgap doesn't answer for"
             return "installer-tools", " ".join(dict.fromkeys(tools))
         files, constraints, prefer_binary, names = _pip_install_files(number, rest, uv, uv_system)
-        return "install", _Install(uv, files, constraints, prefer_binary, names, None, None)
+        return "install", _Install(uv, files, constraints, prefer_binary, names, None, None, globs=globs)
 
 
 def _env_pairs(
@@ -2791,6 +2840,40 @@ def _dockerfile_requirements(
             includes[number, host] = nested
         return host
 
+    def check_glob(glob: str, install: _Install) -> None:
+        """An unquoted `name[extra]` is read as written only when the folder the install runs in can't hold a name
+        the glob matches (`sixa` for `six[a]`, which the shell would put in its place)."""
+        quote = f"quote it ('{glob}') so the shell leaves it as it is"
+        folder = install.cwd
+        why = None
+        if folder is None:
+            why = "the folder it runs in isn't known"
+        elif not image_read:
+            why = f"the image may have files in {folder}"
+        elif folder == "/" or folder.split("/")[1] in _IMAGE_FOLDERS:
+            why = f"{folder} is a folder of the image, which may hold files"
+        if why is None and folder is not None:
+            for line, word, cwd in [*reader.mentions[: install.seen], *reader.created[: install.created]]:
+                if word.startswith("/") or cwd is not None:
+                    path = posixpath.normpath(posixpath.join(cwd or "/", word))
+                    if path == folder or folder.startswith(path.rstrip("/") + "/") or posixpath.dirname(path) == folder:
+                        why = f"line {line} may put files in {folder}"
+                        break
+                elif posixpath.basename(word) and fnmatch.fnmatchcase(posixpath.basename(word), glob):
+                    why = f"line {line} may create {word}"
+                    break
+        if why is None:
+            assert folder is not None
+            for name, copy_line in _names_in_folder(copies, dirs, folder):
+                if fnmatch.fnmatchcase(name, glob):
+                    by = f"the COPY on line {copy_line}" if copy_line is not None else "a WORKDIR"
+                    raise DockerfileError(
+                        f"line {number}: {glob} is a glob to the shell, and {by} puts {name} in {folder}, "
+                        f"which it matches, so pip would install {name}: {quote}"
+                    )
+            return
+        raise DockerfileError(f"line {number}: {glob} is a glob to the shell, and {why}: {quote}")
+
     reader = _RunReader(report, pythons, image_read)
     env: dict[str, str] = {}  # the ENV and ARG values wheelgap knows, as the shell of a RUN sees them
     uv_system = False  # ENV UV_SYSTEM_PYTHON=1: uv reads it as --system
@@ -2880,6 +2963,8 @@ def _dockerfile_requirements(
             installed_by_uv[host] = uv
             used_constraints[host] = constraint_paths
             found.setdefault(host, number)
+        for glob in install.globs:
+            check_glob(glob, install)
         if install.names:
             loose = [
                 name for name in install.names if requirement_to_package(name, "").version is None

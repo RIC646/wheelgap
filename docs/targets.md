@@ -16,8 +16,8 @@ machine-readable list.
 | --- | --- | --- |
 | `linux-x86_64` | `linux`, `linux-amd64`, `linux/amd64` | `manylinux_2_*_x86_64` up to `--glibc` (default 2.36), legacy `manylinux2014`/`2010`/`1` |
 | `linux-aarch64` | `linux-arm64`, `linux/arm64`, `linux/arm64/v8` | `manylinux_2_*_aarch64` from 2.17 up to `--glibc`, legacy `manylinux2014` |
-| `musl-x86_64` | `alpine`, `musl` | `musllinux_1_*_x86_64` up to `--musl` (default 1.2) |
-| `musl-aarch64` | `alpine-arm64` | `musllinux_1_*_aarch64` |
+| `musl-x86_64` | `alpine`, `musl` | `musllinux_1_*_x86_64` up to `--musl` (default 1.2), plain `linux_x86_64` (after 0.13.0) |
+| `musl-aarch64` | `alpine-arm64` | `musllinux_1_*_aarch64`, plain `linux_aarch64` (after 0.13.0) |
 | `macos-arm64` | `macos`, `mac` | `macosx_*_arm64` and `universal2` up to `--macos` (default 14.0) |
 | `macos-x86_64` | `macos-intel` | `macosx_*_x86_64` and `universal2` |
 | `win-amd64` | `windows`, `win` | `win_amd64` |
@@ -26,7 +26,7 @@ machine-readable list.
 | `linux-ppc64le`, `linux-s390x`, `linux-riscv64` | `linux/ppc64le`, `linux/s390x`, `linux/riscv64` | `manylinux_2_*` from 2.17 for that arch (`riscv64` has no legacy `manylinux2014` tag) |
 | `linux-i686` | `linux-x86`, `linux-386`, `linux/386` | `manylinux_2_*_i686` up to `--glibc`, legacy `manylinux2014`/`2010`/`1` (32-bit x86) |
 | `win32` | `windows-x86`, `win-x86` | `win32` (32-bit Python on Windows) |
-| `musl-armv7l`, `musl-ppc64le`, `musl-s390x`, `musl-riscv64`, `musl-i686` | `alpine-armv7`, `alpine-x86` | `musllinux_1_*` for that arch (pip would also take a plain `linux_armv7l` wheel on Alpine, but it's a glibc build, so wheelgap doesn't count it) |
+| `musl-armv7l`, `musl-ppc64le`, `musl-s390x`, `musl-riscv64`, `musl-i686` | `alpine-armv7`, `alpine-x86` | `musllinux_1_*` for that arch, and plain `linux_<arch>` (after 0.13.0) |
 | `pyodide` | `wasm`, `wasm32`, `emscripten` | Pyodide's ABI for that Python: `emscripten_3_1_32` (3.11), `pyodide_2024_0` / `pyemscripten_2024_0` (3.12), `pyodide_2025_0` / `pyemscripten_2025_0` (3.13), `pyemscripten_2026_0` (3.14) |
 | `ios-arm64` | `ios`, `iphoneos` | `ios_*_arm64_iphoneos` up to `--ios` (default 13.0) |
 | `ios-simulator-arm64`, `ios-simulator-x86_64` | `ios-simulator` | `ios_*_arm64_iphonesimulator` / `ios_*_x86_64_iphonesimulator` |
@@ -34,8 +34,11 @@ machine-readable list.
 
 `--list-targets` shows a few more aliases than this table, such as `manylinux-x86_64` and `musllinux-aarch64`.
 
-Every glibc (`linux-*`) target also accepts a plain `linux_<arch>` wheel, as pip does. PyPI only allows those for
-32-bit ARM, so in practice they matter for `linux-armv7l` (a wheel from another index can have one too).
+Every Linux target, glibc (`linux-*`) and musl (`musl-*`, after 0.13.0) alike, also accepts a plain `linux_<arch>`
+wheel, as pip and uv do. PyPI only allows those for 32-bit ARM, so in practice they matter for `linux-armv7l` and for
+wheels from other indexes, such as PyTorch's `torch-1.10.2+cpu-cp39-cp39-linux_x86_64.whl`. Such a wheel is usually
+built against glibc: pip and uv install it on Alpine all the same, and whether it then runs there is another question
+wheelgap doesn't answer.
 
 Docker platform names also work with `-t`, for example `-t linux/amd64,linux/arm64` (also `linux/arm64/v8`,
 `linux/arm/v7`, `linux/ppc64le`, `linux/s390x`, `linux/riscv64` and `linux/386`, also spelled `linux/i386`).

@@ -193,8 +193,6 @@ def _platform_reason(plat: str, target: Target) -> str:
     elif plat.startswith("manylinux") and "_" in plat:  # manylinux2014_aarch64 and friends
         legacy, wheel_arch = plat.split("_", 1)
         kind, (major, minor) = "manylinux", _LEGACY_GLIBC.get(legacy, (0, 0))
-    elif plat == f"linux_{arch}" and family == "musllinux":
-        return f"{plat} is a plain Linux (glibc) build; wheelgap only counts musllinux wheels for musl"
     else:
         return f"{plat} doesn't match {target.platform}"
     same_arch = wheel_arch == arch or (kind == "macosx" and wheel_arch == "universal2")

@@ -1,3 +1,5 @@
+import pytest
+
 from wheelgap.check import Status, check, marker_holds, status_for
 from wheelgap.pypi import fill_all
 from wheelgap.sources import Package, Source, load_inputs
@@ -358,16 +360,24 @@ def test_marker_values_with_quotes_are_not_misread(monkeypatch):
     assert marker_holds("""sys_platform != 'x" and sys_platform == "win32'""", lin)
 
 
-def test_explain_plain_linux_wheel_on_musl_and_ordering():
+@pytest.mark.parametrize("platform", ["musl-x86_64", "musl-aarch64", "musl-armv7l"])
+def test_plain_linux_wheel_counts_on_musl(platform):
+    # pip on Alpine lists linux_<arch> among its tags (packaging 26.3's tags._linux_platforms), and uv does too
+    # (crates/uv-platform-tags/src/tags.rs, 0.13.9): PyTorch's torch-1.10.2+cpu-cp39-cp39-linux_x86_64.whl installs.
+    (musl,) = build_targets(["3.9"], [platform])
+    arch = platform.removeprefix("musl-")
+    assert status_for([f"torch-1.10.2+cpu-cp39-cp39-linux_{arch}.whl"], musl) is Status.WHEEL
+    assert status_for(["torch-1.10.2+cpu-cp39-cp39-linux_s390x.whl"], musl) is Status.MISSING  # another arch
+
+
+def test_explain_ordering_on_musl():
     from wheelgap.check import explain, rejection
 
     (musl,) = build_targets(["3.13"], ["musl-armv7l"])
-    assert rejection("grpcio-1.85.1-cp313-cp313-linux_armv7l.whl", musl) == (
-        "linux_armv7l is a plain Linux (glibc) build; wheelgap only counts musllinux wheels for musl"
-    )
-    files = ["x-1-cp313-abi3-macosx_11_0_universal2.whl", "x-1-cp313-cp313-linux_armv7l.whl"]
+    assert rejection("grpcio-1.85.1-cp313-cp313-linux_aarch64.whl", musl) == "linux_aarch64 doesn't match musl-armv7l"
+    files = ["x-1-cp313-abi3-macosx_11_0_universal2.whl", "x-1-cp312-cp312-linux_armv7l.whl"]
     # The same-arch Linux wheel comes first; a macOS universal2 wheel isn't "same arch" on Linux.
-    assert [f for f, _ in explain(files, musl)][0] == "x-1-cp313-cp313-linux_armv7l.whl"
+    assert [f for f, _ in explain(files, musl)][0] == "x-1-cp312-cp312-linux_armv7l.whl"
 
 
 def test_mobile_explain_reasons_and_sdists():

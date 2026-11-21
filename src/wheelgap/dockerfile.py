@@ -2232,6 +2232,18 @@ class _RunReader:
         return installs
 
     @staticmethod
+    def _local_package(base: str, args: list[str]) -> bool:
+        """Whether a system package command installs a package file (`dpkg -i x.deb`, `apt-get install ./x.deb`,
+        `rpm -i x.rpm`, `apk add --allow-untrusted x.apk`) rather than packages from the distribution."""
+        if base == "dpkg":
+            return any(
+                arg in ("-i", "--install", "--unpack") or re.fullmatch(r"-[a-zA-Z]*i[a-zA-Z]*", arg) for arg in args
+            )
+        if base == "rpm":
+            return any(re.fullmatch(r"-[a-zA-Z]*[iUF][a-zA-Z]*|--install|--upgrade|--freshen", arg) for arg in args)
+        return any(arg.endswith((".deb", ".rpm", ".apk")) or arg == "--allow-untrusted" for arg in args)
+
+    @staticmethod
     def _copies_no_config(words: list[_Word]) -> bool:
         """Whether a cp, mv, ln or install of named files (not a folder's contents) can't be putting a pip or uv
         config file, or a folder that holds one, in place: no recursive copy, and no source named like one."""
@@ -2470,6 +2482,9 @@ class _RunReader:
             return "warning", f"`{shown}`, which runs commands wheelgap can't see"
         if base in ("awk", "gawk", "mawk", "nawk") and any("system" in word.text or "|" in word.text for word in args):
             return "warning", f"`{shown}`, which can run commands wheelgap can't see"
+        if base in _SYSTEM_COMMANDS and self._local_package(base, [word.text for word in args]):
+            # A package file from the build, not the distribution's archive: its files and scripts aren't known.
+            return "warning", f"`{shown}`, which installs a package file wheelgap can't see into"
         if base in _SYSTEM_COMMANDS:
             for word in args:
                 if (m := _SYSTEM_PYTHON_RE.fullmatch(word.text)) and m.group(1) not in _SYSTEM_PYTHON_TOOLS:
@@ -3167,7 +3182,13 @@ def _dockerfile_requirements(
                 if re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
                     run_error = f"line {number}: an {keyword} setting PIP_ or UV_ variables changes what pip installs"
                 if "PATH" in args:
-                    reader.path = "unknown", f"the {keyword} on line {number} may change PATH"
+                    # `ENV PATH "$PATH:/root/go/bin"`: the legacy form with quotes, still split as written.
+                    written = _written_value(args, "PATH") if keyword == "ENV" else None
+                    reader.path = (
+                        reader._path_entry(written, f"ENV PATH on line {number}")
+                        if written is not None
+                        else ("unknown", f"the {keyword} on line {number} may change PATH")
+                    )
                 continue
             for name, value, unset in pairs:
                 arg_values.pop(name, None)

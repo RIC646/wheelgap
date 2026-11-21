@@ -3736,6 +3736,11 @@ _BEFORE_INSTALL = [
     ("RUN python manage.py migrate\n" + _INSTALL, ":4: this line runs `python manage.py migrate`"),
     ("RUN python -c 'import os'\n" + _INSTALL, ":4: this line runs `python -c"),
     ("RUN frobnicate --all\n" + _INSTALL, ":4: this line runs `frobnicate --all`, a program wheelgap doesn't know"),
+    ("RUN dpkg -i /tmp/x.deb\n" + _INSTALL, ":4: this line runs `dpkg -i /tmp/x.deb`, which installs a package file"),
+    ("RUN apt-get install -y ./x.deb\n" + _INSTALL, ":4: .*which installs a package file"),
+    ("RUN rpm -Uvh /tmp/x.rpm\n" + _INSTALL, ":4: .*which installs a package file"),
+    ("RUN apk add --allow-untrusted /tmp/x.apk\n" + _INSTALL, ":4: .*which installs a package file"),
+    ('ENV PATH "/opt/x/bin:$PATH"\n' + _INSTALL, ":5: .*ENV PATH on line 4 puts /opt/x/bin first"),
     ("RUN bash -c 'pip install six' _\n" + _INSTALL, ":4: this line runs `bash -c"),
     ("RUN bash -lc 'pip install six'\n" + _INSTALL, ":4: this line runs `bash -lc"),
     ("RUN su -c 'pip install six' root\n" + _INSTALL, ":4: this line runs `su -c"),
@@ -3891,6 +3896,8 @@ def test_dockerfile_requirements_warns_after_the_last_install(tmp_path, body):
         "RUN python -m venv /opt/venv && . /opt/venv/bin/activate && pip install -r requirements.txt\n",
         "ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:$PATH\n" + _INSTALL,
         "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n" + _INSTALL,
+        'ENV PATH "$PATH:/root/go/bin"\n' + _INSTALL,  # the legacy form, quoted: the image's Python stays first
+        "ENV PATH=${PATH}:/opt/tool/bin\n" + _INSTALL,
         "RUN export PATH=/opt/x/bin:$PATH\n" + _INSTALL,  # a RUN's own PATH ends with it
         # Pip set-up that ends at the newest pip, and cache mounts elsewhere.
         "RUN pip install -U 'pip>=24' setuptools==70.0\n" + _INSTALL,

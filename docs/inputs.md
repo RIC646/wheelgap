@@ -396,8 +396,20 @@ build it. `--explain` says which option did it.
 The same two options written after a requirement (`albumentations>=0.3.2 --no-binary qudida,albumentations`, after
 0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line
 of its own, not only for that requirement. `--hash` and `--config-settings` after a requirement are accepted as
-before. Any other option there is an input error that names the file and line: pip itself ignores some (`--pre`,
-`--index-url`, `-r`) and refuses the rest, so put the option on its own line.
+before.
+
+Other options after a requirement are read as pip 26.3 reads them there (after 0.13.0). pip parses them and then
+ignores `-f` / `--find-links`, `-i` / `--index-url`, `--extra-index-url`, `--no-index`, `--pre`, `--prefer-binary`,
+`-r`, `-c`, `--trusted-host`, `--require-hashes` and `--no-require-hashes`: the requirement is installed as if they
+weren't there, from the same index and at the same version, and no file they name is read. wheelgap ignores them
+too and says so on stderr, once per file and option (`-q` drops it):
+`wheelgap: note: requirements.txt:2: pip ignores -f after a requirement`. To use another index or folder, put the
+option on a line of its own. `--use-feature` is accepted without a note, since no feature changes which file pip
+picks. The rest is an input error that names the file and line: an option pip doesn't have, an ambiguous
+abbreviation, a missing value or one pip's parser refuses (`--hash=abc`, `-C foo`, `--no-binary --pre`)
+(pip refuses the line too); `-e` (pip reads it as making the requirement itself
+editable, and refuses that for a name); and `--all-releases` / `--only-final`, which pip applies to the whole install
+and wheelgap doesn't read.
 
 An included file that can't be read (`-r FILE` or `-c FILE` naming a file that isn't there) is an input error that
 names the including file and line, `requirements.txt:3: -r base.txt: file not found`; pip stops there too.

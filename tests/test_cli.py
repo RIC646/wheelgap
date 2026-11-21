@@ -410,6 +410,24 @@ def test_requirement_line_no_binary_is_honoured_as_pip_does(capsys, fake_pypi, t
     assert results == {"fastlib": "wheel", "purewheel": "wheel"} and code == 0
 
 
+def test_requirement_line_option_pip_ignores_is_a_note(capsys, fake_pypi, tmp_path):
+    # xai-org/grok-1's requirements.txt has `jax[cuda12-pip]==0.4.25 -f https://...`: pip 26.3 ignores the -f there
+    # and installs the requirement from PyPI, so wheelgap checks it on PyPI and says it left the option out.
+    req = tmp_path / "requirements.txt"
+    req.write_text(
+        "purewheel==3.1\nfastlib[extra]==2.0.0 -f https://user:secret@example.invalid/wheels.html\n"
+        "nowheels==0.9 --find-links ./w\n",
+        encoding="utf-8",
+    )
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "--json")
+    results = {p["name"]: p["results"]["linux-x86_64"] for p in json.loads(out)["packages"]}
+    assert results == {"purewheel": "wheel", "fastlib": "wheel", "nowheels": "source"} and code == 1
+    assert err.count("wheelgap: note: requirements.txt:2: pip ignores -f after a requirement\n") == 1
+    assert "--find-links" not in err and "secret" not in err and "example.invalid" not in err
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "-q")
+    assert code == 1 and "pip ignores" not in err
+
+
 def test_requirements_include_cycle_exits_2(capsys, tmp_path, monkeypatch):
     # pip refuses an include cycle, so wheelgap does too: exit code 2, and the same error with
     # --github-annotations, since the file is parsed before any line is looked up (#603).
@@ -3855,6 +3873,15 @@ def test_github_annotations_requirements_lines(capsys, fake_pypi, tmp_path, monk
     # A continued requirement is on the first line with something on it.
     req.write_text("purewheel==3.1\n\\\n\\\nnowheels==0.9\n", encoding="utf-8")
     assert annotate(capsys, tmp_path, str(req)) == ["::error file=requirements.txt,line=4,"]
+
+
+def test_github_annotations_requirement_with_options_keeps_its_line(capsys, fake_pypi, tmp_path, monkeypatch):
+    # The requirement ends where the parser ends it, before its options, so the line still matches.
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    req = tmp_path / "requirements.txt"
+    for line in ("nowheels==0.9 -f https://example.invalid/w.html", "nowheels==0.9 --no-binary nowheels"):
+        req.write_text(f"purewheel==3.1\n{line}\n", encoding="utf-8")
+        assert annotate(capsys, tmp_path, str(req)) == ["::error file=requirements.txt,line=2,"]
 
 
 def test_github_annotations_requirements_include_after_options(capsys, fake_pypi, tmp_path, monkeypatch):

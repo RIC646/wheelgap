@@ -82,6 +82,13 @@ Both checks ask wheelgap about a pin (`NAME==VERSION`), which wheelgap answers a
 
 Both modes print the mismatch rate (disagreements out of the checks compared) and every disagreement with a command to reproduce it; `--json FILE` also writes the totals, the rate, per-target counts and each difference to a file. The script exits 1 if any comparison disagrees and 2 if a check failed (for example, PyPI was unreachable) or there were no comparable targets. The [Accuracy](.github/workflows/accuracy.yml) workflow runs both modes every Monday, puts each rate in the run's summary and keeps the two results files as an artifact.
 
+`scripts/check_projects.py` does the same for whole projects: a `uv.lock` with its `pyproject.toml`, or a fully pinned requirements file, read the way the project uses it (markers, forks, `[tool.uv] sources`, extras and `conflicts`, groups, `environments`, includes). For each input and target it compares which packages install, at which version, and whether each comes from a wheel, from source or not at all, with `uv sync --frozen --dry-run` for a `uv.lock` and with pip and `uv pip compile` for a requirements file. Nothing from the project is run: only its lock, `pyproject.toml` and requirements files are copied and read. It writes `results.json` (every cell, with the referee command) and `report.txt` (agreement per target and input kind, disagreements grouped), and caches the referees' answers, so a rerun on a new commit is quick. The script's docstring says how each answer is worked out and what isn't compared (Poetry locks, and differences that only uv's platform emulation causes):
+
+```bash
+uv run --with pip python scripts/check_projects.py manifest CORPUS_DIR -o manifest.json   # inputs from a corpus folder
+uv run --with pip python scripts/check_projects.py run manifest.json -o results           # compare them all
+```
+
 ## Questions
 
 Ask in [Discussions → Q&A](https://github.com/wheelgap/wheelgap/discussions/categories/q-a). No question is too basic.

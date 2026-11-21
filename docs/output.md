@@ -467,8 +467,9 @@ path as given, the `line` it is about (or `null`), a `kind` to match on and the 
 The kinds: `image-not-read` (`-p` and `-t` stood in for an [image wheelgap can't read](cli.md#dockerfile));
 `passed-over:CLASS`, one per class of `RUN` line [`--dockerfile-inputs`](cli.md#dockerfile-inputs) didn't read
 because it installs no Python packages with pip or uv (`system-packages`, `shell`, `programs`, `venv`,
-`cache-mounts`, `installer-tools`), with `line` `null` and the line numbers in `lines`; and `arg-unset` (an
-`ARG PIP_...` with no default, read as unset). The key is absent when there is nothing to say.
+`cache-mounts`, `installer-tools`), with `line` `null` and the line numbers in `lines`; `arg-unset` (an
+`ARG PIP_...` with no default, read as unset); and `system-python-packages` (system package commands on `lines`
+install Python packages, which pip may keep instead of fetching a requirement). The key is absent when there is nothing to say.
 
 `dockerfile_warnings` (after 0.13.0, always there with `--dockerfile-inputs`) lists the `RUN` lines wheelgap
 couldn't see into, which may install Python packages the answer doesn't have: `dockerfile`, `line`, `kind`

@@ -3278,3 +3278,31 @@ def test_cli_dockerfile_inputs_json_has_no_warnings_when_every_run_is_read(tmp_p
     # Without --dockerfile-inputs nothing is read from the RUN lines, so there is no key.
     assert main(["purewheel", "--dockerfile", str(path), "--json"]) == 0
     assert "dockerfile_warnings" not in json.loads(capsys.readouterr().out)
+
+
+def test_cli_dockerfile_inputs_says_when_the_system_package_manager_installs_python_packages(
+    tmp_path, capsys, fake_pypi
+):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13-alpine\nRUN apk add --no-cache git py3-yaml py3-gevent py3-pip python3-dev\n"
+        "RUN apt-get install -y python3 python3.12-venv python3-numpy python-is-python3 && apk add py3-yaml\n"
+        "WORKDIR /app\nCOPY requirements.txt .\n" + _INSTALL,
+    )
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    captured = capsys.readouterr()
+    [note] = [n for n in json.loads(captured.out)["dockerfile_notes"] if n["kind"] == "system-python-packages"]
+    assert note["lines"] == [2, 3]
+    assert (
+        "lines 2, 3 install Python packages with the system package manager (py3-yaml, py3-gevent, python3-numpy)"
+        in (note["message"])
+    )
+    assert "pip keeps one of those when it satisfies a requirement" in captured.err
+    # None of these is one: the interpreter's own pieces, and the installer.
+    path.write_text(
+        "FROM python:3.13\nRUN apt-get install -y python3 python3-pip python3-dev python3.12-venv python3-setuptools\n"
+        "WORKDIR /app\nCOPY requirements.txt .\n" + _INSTALL,
+        encoding="utf-8",
+    )
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    assert "system-python-packages" not in capsys.readouterr().out

@@ -54,7 +54,7 @@
                     "message": {"type": "string", "description": "The note as printed on stderr."},
                     "lines": {
                         "type": "array",
-                        "description": "For passed-over:CLASS, the RUN lines of that class.",
+                        "description": "For passed-over:CLASS and system-python-packages, the RUN lines concerned.",
                         "items": {"type": "integer", "minimum": 1}
                     }
                 }

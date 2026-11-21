@@ -1166,6 +1166,21 @@ def dockerfile_report_notes(
                 "lines": sorted(lines),
             }
         )
+    if report.system_python:
+        lines = sorted({line for line, _ in report.system_python})
+        names = list(dict.fromkeys(name for _, name in report.system_python))
+        listed = ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
+        notes.append(
+            {
+                "dockerfile": dockerfile,
+                "line": None,
+                "kind": "system-python-packages",
+                "message": f"{_line_list(lines)} install{'s' if len(lines) == 1 else ''} Python packages with the "
+                f"system package manager ({listed}): pip keeps one of those when it satisfies a requirement, and "
+                "wheelgap checks every requirement as a fresh install, so it may report a gap the build doesn't have",
+                "lines": lines,
+            }
+        )
     for line, kind, message in report.notes:
         notes.append({"dockerfile": dockerfile, "line": line, "kind": kind, "message": message})
     warnings: list[dict[str, object]] = [

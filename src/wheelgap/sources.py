@@ -839,6 +839,15 @@ def select_uv_dependencies(
             else:
                 raise SourceError(f"{pyproject}: [tool.uv] default-groups must be a list of strings or 'all'")
         if source.edges is None:
+            if not source.uv_packages:
+                # An empty lock (no packages, no manifest): uv sync installs nothing, whatever leaves things out
+                # (--no-dev, --all-extras, --no-default-groups), and stops at an extra or group it names, since
+                # no project defines one.
+                named_groups = selection.groups | selection.only_groups
+                for label, named in (("extras", selection.extras), ("groups", named_groups)):
+                    if named:
+                        raise SourceError(f"{source.label}: unknown {label}: {', '.join(sorted(named))}")
+                continue
             raise SourceError(f"{source.label}: cannot select extras/groups without project or manifest roots")
         packages = source.uv_packages or []
         roots = uv_selected_roots(source)

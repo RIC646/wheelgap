@@ -255,6 +255,52 @@ def test_emulation_needs_an_installed_parent(tmp_path):
     assert {c.package.split("==")[0]: c.verdict for c in cells} == {"child": "not compared", "gate": "agree"}
 
 
+# cognee's shape: the project needs `shared` itself, and `forked` (whose fork markers turn on python_full_version)
+# needs it too. `shared` installs whatever uv emulates; `below`, reached only through `forked`, may not.
+SOLID_LOCK = """\
+version = 1
+revision = 3
+requires-python = ">=3.10"
+
+[[package]]
+name = "a"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "shared" }, { name = "forked" }]
+
+[[package]]
+name = "forked"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = ["python_full_version >= '3.13.1'", "python_full_version < '3.13.1'"]
+dependencies = [{ name = "shared" }, { name = "below" }]
+
+[[package]]
+name = "forked"
+version = "0.9"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = ["python_full_version < '3.13.1'"]
+
+[[package]]
+name = "shared"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "below"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+
+
+def test_emulation_leaves_out_what_the_project_always_installs(tmp_path):
+    path = tmp_path / "uv.lock"
+    path.write_text(SOLID_LOCK, encoding="utf-8")
+    lock = script.read_lock(path)
+    assert lock.solid == {"a", "shared"}
+    assert lock.emulated(LINUX, installed={"forked", "shared", "below"}) == {"forked", "below"}
+
+
 @pytest.mark.parametrize(
     ("marker", "target", "depends"),
     [
@@ -739,11 +785,29 @@ def test_flatten_reads_includes_and_markers(tmp_path):
         "six>=1",
         "-r missing.txt",
         "idna==3.10 --no-binary idna",
+        # pip reads every option on a line, so an index option can't carry another one with it.
+        "-i https://pypi.org/simple --only-binary :none:",
+        "--index-url=https://pypi.org/simple --no-binary=:all:",
+        "--pre --no-binary :all:",
+        "--prefer-binary --find-links x",
+        "--trusted-host x --no-binary idna",
+        "--extra-index-url https://x.test/simple \\\n  --only-binary :none:",
+        "-i --no-binary=:all:",
+        "--extra-index-url https://x.test/${GITHUB_TOKEN}/simple",  # pip and uv expand it from os.environ
     ],
 )
 def test_flatten_refuses(tmp_path, line):
     (tmp_path / "requirements.txt").write_text(f"{line}\nidna==3.10\n", encoding="utf-8")
     assert script.flatten(tmp_path / "requirements.txt").refuse
+
+
+@pytest.mark.parametrize(
+    "line", ["-i https://pypi.org/simple", "--index-url=https://pypi.org/simple", "--trusted-host x.test", "--pre"]
+)
+def test_flatten_passes_index_options(tmp_path, line):
+    (tmp_path / "requirements.txt").write_text(f"{line}\nidna==3.10\n", encoding="utf-8")
+    flat = script.flatten(tmp_path / "requirements.txt")
+    assert flat.refuse is None and flat.options == [line]
 
 
 def test_pip_sdist_seen():
@@ -880,3 +944,14 @@ def test_wheelgap_answer_keys_rows_by_lock_entry(tmp_path, lock):
     assert "torch==2.9.1+cpu @ https://pt.test/cpu" not in rows
     assert rows["appnope==0.1.4 @ https://pypi.org/simple"] == "wheel"
     assert ours["ambiguous"] == []
+
+
+def test_flatten_refuses_an_include_outside_the_folder(tmp_path):
+    (tmp_path / "outside.txt").write_text("idna==3.10\n", encoding="utf-8")
+    (tmp_path / "input").mkdir()
+    for line in ("-r ../outside.txt", f"-r {tmp_path / 'outside.txt'}"):
+        (tmp_path / "input" / "requirements.txt").write_text(f"{line}\nsix==1.16.0\n", encoding="utf-8")
+        assert "outside" in script.flatten(tmp_path / "input" / "requirements.txt").refuse
+    (tmp_path / "input" / "base.txt").write_text("idna==3.10\n", encoding="utf-8")
+    (tmp_path / "input" / "requirements.txt").write_text("-r base.txt\nsix==1.16.0\n", encoding="utf-8")
+    assert not script.flatten(tmp_path / "input" / "requirements.txt").refuse

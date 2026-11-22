@@ -156,7 +156,6 @@ PYTHONS = ("3.13", "3.15")
 PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-arm64", "win-amd64", "musl-x86_64", "win-arm64")
 MAX_RUNS = 400  # per pass: one run per package without a wheel, plus one
 UV_TIMEOUT = 300
-PIP_TIMEOUT = 600
 
 WHEEL, SOURCE, MISSING, NO_WHEEL, UNKNOWN = "wheel", "source", "missing", "no wheel", "unknown"
 AGREE, DISAGREE, NOT_COMPARED = "agree", "disagree", "not compared"
@@ -393,6 +392,8 @@ class LockInfo:
     edges: dict[str, list[tuple[str, str]]]  # name -> [(dependency name, marker)]
     fork_markers: dict[str, list[str]]  # name -> resolution-markers of its entries
     requires_python: str = ""
+    # name -> dependencies from its `dependencies` table with no marker (installed whenever it is)
+    required: dict[str, list[str]] = field(default_factory=dict)
     _emulated: dict[tuple[Target, frozenset[str]], set[str]] = field(default_factory=dict, repr=False)
     _depends: dict[Target, dict[str, bool]] = field(default_factory=dict, repr=False)
 
@@ -430,6 +431,21 @@ class LockInfo:
         path, git and URL packages (left out with --no-install-*, but their dependencies are installed)."""
         return {e.name for e in self.entries if e.kind != "registry"}
 
+    @property
+    def solid(self) -> set[str]:
+        """Names uv installs at one version on every target whatever the markers say: reached from the project
+        (the lock's `.` entry, which every uv sync walks through) by marker-free `dependencies` edges only, each
+        to a name locked once. Emulation can't change whether or at which version these install."""
+        once = {name for name, n in Counter(e.name for e in self.entries).items() if n == 1}
+        todo = [e.name for e in self.entries if e.kind != "registry" and e.url == "."]
+        out: set[str] = set()
+        while todo:
+            name = todo.pop()
+            if name not in out:
+                out.add(name)
+                todo += [dep for dep in self.required.get(name, []) if dep in once]
+        return out
+
     def emulated(self, target: Target, installed: Iterable[str]) -> set[str]:
         """Names whose install or version on the target may turn on a marker uv emulates (emulated_markers()), given
         the names uv installs there (`installed`). A package is in it when its fork markers depend on an emulated
@@ -448,7 +464,8 @@ class LockInfo:
                 checked[marker] = depends_on_emulation(marker, target, variables)
             return checked[marker]
 
-        out = {name for name, markers in self.fork_markers.items() if any(depends(m) for m in markers)}
+        solid = self.solid
+        out = {name for name, markers in self.fork_markers.items() if any(depends(m) for m in markers)} - solid
         changed = True
         while changed:
             changed = False
@@ -457,7 +474,7 @@ class LockInfo:
                 if not inside and parent not in live:
                     continue
                 for dep, marker in edges:
-                    if dep not in out and (inside or (marker and depends(marker))):
+                    if dep not in out and dep not in solid and (inside or (marker and depends(marker))):
                         out.add(dep)
                         changed = True
         self._emulated[cache_key] = out
@@ -478,6 +495,7 @@ def read_lock(path: Path) -> LockInfo:
     entries: list[LockEntry] = []
     edges: dict[str, list[tuple[str, str]]] = defaultdict(list)
     forks: dict[str, list[str]] = defaultdict(list)
+    required: dict[str, list[str]] = defaultdict(list)
     for package in data.get("package", []):
         name = canonicalize_name(package["name"])
         source = package.get("source", {})
@@ -490,6 +508,7 @@ def read_lock(path: Path) -> LockInfo:
             LockEntry(name, norm_version(str(package.get("version", ""))), kind, url, frozenset(f for f in files if f))
         )
         deps = list(package.get("dependencies", []))
+        required[name] += [canonicalize_name(d["name"]) for d in deps if not d.get("marker")]
         for table in ("optional-dependencies", "dev-dependencies"):
             for items in package.get(table, {}).values():
                 deps += items
@@ -500,6 +519,7 @@ def read_lock(path: Path) -> LockInfo:
         conflicts=[list(group) for group in data.get("conflicts", [])],
         edges=dict(edges),
         fork_markers=dict(forks),
+        required=dict(required),
         requires_python=str(data.get("requires-python", "")),
     )
 
@@ -787,21 +807,31 @@ class Flat:
     refuse: str | None = None
 
 
-_SAFE_OPTION = re.compile(r"^(-i|--index-url|--extra-index-url|--trusted-host|--pre|--prefer-binary)\b")
+# A whole line that is one index option and its value: pip reads every option on a line (`--pre --no-binary :all:`
+# turns builds back on), so a line that only starts with one of these isn't enough. No `$` in the value: pip and uv
+# expand ${VAR} from this machine's environment, which would send it to the file's index.
+_SAFE_OPTION = re.compile(
+    r"^(?:(?:-i|--index-url|--extra-index-url|--trusted-host)(?:\s*=\s*|\s+)(?!-)[^\s$]+|--pre|--prefer-binary)$"
+)
 _INCLUDE = re.compile(r"^(?:-r|--requirement)(?:\s*=\s*|\s+|(?=\S))(\S+)$")
 
 
-def flatten(path: Path, seen: set[Path] | None = None) -> Flat:
-    """A requirements file's pins and options, with its -r includes read in, for one flat file to give pip and uv."""
+def flatten(path: Path, seen: set[Path] | None = None, root: Path | None = None) -> Flat:
+    """A requirements file's pins and options, with its -r includes read in, for one flat file to give pip and uv.
+    An include must stay inside the top file's folder (the staged copy): `-r /etc/x` or `-r ../../x` would read a
+    file of this machine's."""
     seen = seen if seen is not None else set()
+    root = root if root is not None else path.parent.resolve()
     seen.add(path.resolve())
     flat = Flat([], [])
     for _, line in requirement_lines(path.read_text(encoding="utf-8", errors="replace")):
         if include := _INCLUDE.match(line):
             child = (path.parent / include.group(1)).resolve()
+            if not child.is_relative_to(root):
+                return Flat([], [], refuse=f"{line}: include outside the input's folder")
             if child in seen or not child.is_file():
                 return Flat([], [], refuse=f"{line}: include missing or repeated")
-            sub = flatten(child, seen)
+            sub = flatten(child, seen, root)
             if sub.refuse:
                 return sub
             flat.pins += sub.pins

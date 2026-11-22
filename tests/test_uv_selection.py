@@ -2310,3 +2310,38 @@ def test_cli_empty_lock_with_no_dev_has_no_packages_to_check(tmp_path, capsys, f
     assert main([str(tmp_path / "uv.lock"), "--no-dev", "-p", "3.13", "-t", "linux-x86_64"]) == 0
     assert "No packages to check" in capsys.readouterr().out
     assert fake_pypi == []
+
+
+# `[dependency-groups] dev = []` and no [project]: uv lock writes the groups to the manifest and no packages.
+GROUPS_ONLY_UV_LOCK = EMPTY_UV_LOCK + "\n[manifest.dependency-groups]\ndev = []\nlint = []\n"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        UvSelection(groups=frozenset({"dev"})),
+        UvSelection(only_groups=frozenset({"lint"})),
+        UvSelection(no_dev=True, groups=frozenset({"lint"})),
+    ],
+)
+def test_empty_lock_with_manifest_groups_selects_them(tmp_path, selection):
+    # uv sync --group dev / --only-group lint on that lock: "Would make no changes", not an unknown group.
+    (tmp_path / "uv.lock").write_text(GROUPS_ONLY_UV_LOCK, encoding="utf-8")
+    sources = load_inputs([str(tmp_path / "uv.lock")])
+    select_uv_dependencies(sources, selection)
+    assert [p.name for source in sources for p in source.packages] == []
+
+
+def test_empty_lock_with_manifest_groups_still_rejects_other_groups(tmp_path):
+    (tmp_path / "uv.lock").write_text(GROUPS_ONLY_UV_LOCK, encoding="utf-8")
+    with pytest.raises(SourceError, match="unknown groups: docs"):
+        select_uv_dependencies(load_inputs([str(tmp_path / "uv.lock")]), UvSelection(groups=frozenset({"docs"})))
+
+
+def test_empty_lock_with_an_unknown_default_group_is_an_error(tmp_path):
+    # uv sync --no-dev: "Default group `nope` (from `tool.uv.default-groups`) is not defined in the project's
+    # `dependency-groups` table", whatever the flags.
+    (tmp_path / "uv.lock").write_text(EMPTY_UV_LOCK, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[tool.uv]\ndefault-groups = ["nope"]\n', encoding="utf-8")
+    with pytest.raises(SourceError, match="unknown default groups: nope"):
+        select_uv_dependencies(load_inputs([str(tmp_path / "uv.lock")]), UvSelection(no_dev=True))

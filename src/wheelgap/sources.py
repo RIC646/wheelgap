@@ -204,6 +204,10 @@ class Source:
     uv_script: str | None = None
     uv_default_groups: list[str] = field(default_factory=lambda: ["dev"])
     uv_selection: UvSelection | None = None
+    # uv.lock only: its `conflicts` ([tool.uv] conflicts), each set as the names uv's markers give its items
+    # (`extra-4-demo-old`, `group-4-demo-cpu`, `project-4-demo`; check.py's _conflict_worlds). None when the lock
+    # has none, or when they can't be read, which leaves those names unknown.
+    uv_conflicts: list[list[str]] | None = None
     # A requirements file (requirements.txt, .in, requirements.lock): unpinned lines get the newest release.
     requirements: bool = False
     # pyproject.toml only: [project] optional-dependencies by canonical extra name, applied with --extra.
@@ -699,7 +703,43 @@ def parse_uv_lock(path: Path) -> Source:
     if not isinstance(supported, list) or not all(isinstance(marker, str) for marker in supported):
         raise SourceError(f"{path.name}: `supported-markers` isn't a list of strings")
     source.supported_markers = supported
+    source.uv_conflicts = _uv_conflicts(data.get("conflicts"))
     return source
+
+
+def uv_conflict_name(package: str, kind: str, name: str | None = None) -> str:
+    """The name uv's lock markers give a conflict item: `extra == 'extra-4-demo-old'` holds when the extra `old` of
+    the package `demo` is on. The number is the package name's length. encode_package_extra, encode_package_group and
+    encode_project in https://github.com/astral-sh/uv/blob/0.13.9/crates/uv-resolver-types/src/universal_marker.rs"""
+    package = canonicalize_name(package)
+    if kind == "project":
+        return f"project-{len(package)}-{package}"
+    return f"{kind}-{len(package)}-{package}-{canonicalize_name(name or '')}"
+
+
+def _uv_conflicts(conflicts: object) -> list[list[str]] | None:
+    """A uv.lock's `conflicts` as lists of uv_conflict_name names, or None when there are none or a set doesn't have
+    the shape uv writes (a list of tables, each with a `package` and at most one `extra` or `group`)."""
+    if not isinstance(conflicts, list) or not conflicts:
+        return None
+    sets: list[list[str]] = []
+    for items in conflicts:
+        if not isinstance(items, list):
+            return None
+        names: list[str] = []
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("package"), str)
+                or len(item.keys() - {"package"}) > 1
+            ):
+                return None
+            kind = next(iter(item.keys() - {"package"}), "project")
+            if kind not in ("project", "extra", "group") or (kind != "project" and not isinstance(item[kind], str)):
+                return None
+            names.append(uv_conflict_name(item["package"], kind, item.get(kind)))
+        sets.append(names)
+    return sets
 
 
 def uv_selected_roots(source: Source) -> list[int]:

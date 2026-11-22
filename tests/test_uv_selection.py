@@ -14,6 +14,7 @@ from wheelgap.sources import (
     file_kind,
     load_inputs,
     select_uv_dependencies,
+    uv_conflict_name,
 )
 from wheelgap.targets import build_targets
 
@@ -77,6 +78,213 @@ def test_whole_lock_follows_a_dependency_extra_only_where_it_is_requested(tmp_pa
     sources = load_inputs([str(tmp_path / "uv.lock")])
     rows = check(sources, build_targets([python], ["linux-x86_64"]))
     assert {r.package.name for r in rows if r.needed} == expected
+
+
+# The edges and markers of locks uv 0.13.1 wrote (`uv lock --python 3.13`), with the hashes left out. Two extras of
+# `demo` conflict ([tool.uv] conflicts = [[{ extra = "old" }, { extra = "new" }]]): uv writes when each side is on as
+# `extra == 'extra-4-demo-old'`, and keeps clauses that need both sides at once, which no install has.
+PORTALOCKER = """
+[[package]]
+name = "portalocker"
+version = "1.7.1"
+source = {{ registry = "https://pypi.org/simple" }}
+dependencies = [{{ name = "pywin32", marker = "{old}" }}]
+wheels = [{{ url = "https://example.invalid/portalocker-1.7.1-py2.py3-none-any.whl" }}]
+[[package]]
+name = "portalocker"
+version = "2.10.1"
+source = {{ registry = "https://pypi.org/simple" }}
+dependencies = [{{ name = "pywin32", marker = "{new}" }}]
+wheels = [{{ url = "https://example.invalid/portalocker-2.10.1-py3-none-any.whl" }}]
+[[package]]
+name = "pywin32"
+version = "312"
+source = {{ registry = "https://pypi.org/simple" }}
+wheels = [{{ url = "https://example.invalid/pywin32-312-cp313-cp313-win_amd64.whl" }}]
+"""
+OLD_172 = '{ name = "portalocker", version = "1.7.1", source = { registry = "https://pypi.org/simple" }'
+NEW_2101 = '{ name = "portalocker", version = "2.10.1", source = { registry = "https://pypi.org/simple" }'
+
+
+def conflict_lock(kind):
+    """`kind`: "extra" (the extras old and new of demo conflict) or "group" (its dependency groups, new the default)."""
+    old, new = f"{kind}-4-demo-old", f"{kind}-4-demo-new"
+    table = "optional-dependencies" if kind == "extra" else "dev-dependencies"
+    return (
+        f'version = 1\nrevision = 5\nrequires-python = ">=3.12"\n'
+        f'conflicts = [[{{ package = "demo", {kind} = "new" }}, {{ package = "demo", {kind} = "old" }}]]\n'
+        f'[[package]]\nname = "demo"\nversion = "0.1.0"\nsource = {{ virtual = "." }}\n'
+        "dependencies = [\n"
+        f"    {OLD_172}, marker = \"extra == '{old}'\" }},\n"
+        f"    {NEW_2101}, marker = \"extra == '{new}' or extra != '{old}'\" }},\n]\n"
+        f"[package.{table}]\nnew = [{NEW_2101} }}]\nold = [{OLD_172} }}]\n"
+        + PORTALOCKER.format(
+            old=f"(sys_platform == 'win32' and extra == '{old}') or (extra == '{new}' and extra == '{old}')",
+            new=f"(sys_platform == 'win32' and extra == '{new}') or (sys_platform == 'win32' and extra != '{old}') "
+            f"or (extra == '{new}' and extra == '{old}')",
+        )
+    )
+
+
+def needed(tmp_path, lock, selection=None, pyproject=None):
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    if pyproject is not None:
+        (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    sources = load_inputs([str(tmp_path / "uv.lock")])
+    if selection is not None:
+        select_uv_dependencies(sources, selection)
+    targets = build_targets(["3.13"], ["linux-x86_64", "win-amd64"])
+    rows = check(sources, targets)
+    return {
+        t.platform: {f"{r.package.name} {r.package.version}" for r in rows if r.results[t].value != "n/a"}
+        for t in targets
+    }
+
+
+BOTH = {"portalocker 1.7.1", "portalocker 2.10.1"}
+
+
+@pytest.mark.parametrize(
+    ("selection", "linux"),
+    [
+        # Every extra: each way of turning on none or one side, as `uv sync --all-extras --no-extra ...` installs.
+        (None, BOTH),
+        (UvSelection(all_extras=True), BOTH),  # uv refuses both sides, so the same
+        (UvSelection(), {"portalocker 2.10.1"}),  # plain `uv sync`
+        (UvSelection(extras=frozenset({"new"})), {"portalocker 2.10.1"}),
+        (UvSelection(extras=frozenset({"old"})), {"portalocker 1.7.1"}),  # only the extra's portalocker
+    ],
+)
+def test_uv_conflict_markers_are_evaluated_as_uv_does(tmp_path, selection, linux):
+    # pywin32's only clause off Windows needs both extras on, which uv never installs (and wheelgap used to count).
+    assert needed(tmp_path, conflict_lock("extra"), selection) == {
+        "linux-x86_64": linux,
+        "win-amd64": {*linux, "pywin32 312"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("selection", "linux"),
+    [
+        (None, BOTH),
+        (UvSelection(no_dev=True), {"portalocker 2.10.1"}),  # the default group new: `uv sync --no-dev`
+        (UvSelection(only_groups=frozenset({"old"})), {"portalocker 1.7.1"}),  # `uv sync --only-group old`
+    ],
+)
+def test_uv_conflicting_groups(tmp_path, selection, linux):
+    pyproject = '[project]\nname = "demo"\nversion = "0.1.0"\n[tool.uv]\ndefault-groups = ["new"]\n'
+    found = needed(tmp_path, conflict_lock("group"), selection, pyproject)
+    assert found == {"linux-x86_64": linux, "win-amd64": {*linux, "pywin32 312"}}
+
+
+# A workspace (uv lock, uv 0.13.1) whose project asks for `lib[cpu]`, where lib's extras cpu and gpu conflict. uv
+# counts an edge's own extras as on for its marker, and turns them on for the whole install, so any install with gpu
+# also has cpu, which `uv sync` refuses ("Found conflicting extras `lib[cpu]` and `lib[gpu]` enabled
+# simultaneously"): no install has portalocker 2.10.1.
+WORKSPACE_CONFLICT_LOCK = (
+    """
+version = 1
+revision = 5
+requires-python = ">=3.12"
+conflicts = [[{ package = "lib", extra = "cpu" }, { package = "lib", extra = "gpu" }]]
+[manifest]
+members = ["app", "lib"]
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "lib" }, { name = "lib", extra = ["cpu"], marker = "extra == 'extra-3-lib-cpu'" }]
+[[package]]
+name = "lib"
+version = "0.1.0"
+source = { editable = "lib" }
+[package.optional-dependencies]
+"""
+    + f"cpu = [{OLD_172} }}]\ngpu = [{NEW_2101} }}]\n"
+    + PORTALOCKER.format(old="sys_platform == 'win32'", new="sys_platform == 'win32'")
+)
+
+
+def test_uv_conflict_turned_on_by_an_edge(tmp_path):
+    assert needed(tmp_path, WORKSPACE_CONFLICT_LOCK) == {
+        "linux-x86_64": {"portalocker 1.7.1"},
+        "win-amd64": {"portalocker 1.7.1", "pywin32 312"},
+    }
+
+
+@pytest.mark.parametrize(
+    "conflicts",
+    [
+        # A conflict between projects, which leaves members out of an install: not worked out, so unknown as before.
+        'conflicts = [[{ package = "demo" }, { package = "other" }]]',
+        'conflicts = [[{ package = "demo", extra = "new", group = "old" }]]',  # not a shape uv writes
+        "conflicts = 5",
+    ],
+)
+def test_uv_conflicts_wheelgap_cannot_work_out_stay_unknown(tmp_path, conflicts):
+    lock = conflict_lock("extra").replace(conflict_lock("extra").splitlines()[3], conflicts)
+    assert needed(tmp_path, lock)["linux-x86_64"] == {*BOTH, "pywin32 312"}
+
+
+# uv sync evaluates a root's group edges before its first walk, so an extra that an edge turns on later (lib[cpu]) is
+# still off for them (to_resolution_from_packages; its TODO). uv 0.13.1 writes this lock for a project that asks for
+# lib[cpu] and has a dev group needing portalocker, which lib's cpu and gpu extras pin apart, and `uv sync --dry-run`
+# plans both portalockers: 1.7.1 through lib[cpu] and 2.10.1 through the dev group.
+GROUP_BEFORE_WALK_LOCK = (
+    """
+version = 1
+revision = 5
+requires-python = ">=3.12"
+conflicts = [[{ package = "lib", extra = "cpu" }, { package = "lib", extra = "gpu" }]]
+[manifest]
+members = ["app", "lib"]
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "lib", extra = ["cpu"], marker = "extra == 'extra-3-lib-cpu'" }]
+[package.dev-dependencies]
+"""
+    + f"dev = [{OLD_172}, marker = \"extra == 'extra-3-lib-cpu'\" }}, "
+    + f"{NEW_2101}, marker = \"extra == 'extra-3-lib-gpu' or extra != 'extra-3-lib-cpu'\" }}]\n"
+    + """
+[[package]]
+name = "lib"
+version = "0.1.0"
+source = { editable = "lib" }
+[package.optional-dependencies]
+"""
+    + f"cpu = [{OLD_172} }}]\ngpu = [{NEW_2101} }}]\n"
+    + PORTALOCKER.format(old="sys_platform == 'win32'", new="sys_platform == 'win32'")
+)
+
+
+@pytest.mark.parametrize("selection", [None, UvSelection()])
+def test_uv_group_edges_see_only_the_roots_items(tmp_path, selection):
+    assert needed(tmp_path, GROUP_BEFORE_WALK_LOCK, selection)["linux-x86_64"] == BOTH
+
+
+def test_uv_project_conflict_markers_stay_unknown(tmp_path):
+    # `{ package = "a" }` conflicts: uv writes `extra == 'project-1-a'`, which used to read as false, hiding every
+    # package (`uv sync --package a` and `--package b` install them).
+    lock = (
+        'version = 1\nrevision = 5\nrequires-python = ">=3.12"\n'
+        'conflicts = [[{ package = "a" }, { package = "b" }]]\n[manifest]\nmembers = ["a", "b", "root"]\n'
+        '[[package]]\nname = "root"\nversion = "0.1.0"\nsource = { virtual = "." }\n'
+        f'[[package]]\nname = "a"\nversion = "0.1.0"\nsource = {{ editable = "a" }}\n'
+        f"dependencies = [{OLD_172}, marker = \"extra == 'project-1-a'\" }}]\n"
+        f'[[package]]\nname = "b"\nversion = "0.1.0"\nsource = {{ editable = "b" }}\n'
+        f"dependencies = [{NEW_2101}, marker = \"extra == 'project-1-b'\" }}]\n"
+        + PORTALOCKER.format(old="sys_platform == 'win32'", new="sys_platform == 'win32'")
+    )
+    assert needed(tmp_path, lock)["linux-x86_64"] == BOTH
+
+
+def test_uv_conflict_names():
+    # uv's own examples: `extra-3-foo-x1` (universal_marker.rs), names normalized first.
+    assert uv_conflict_name("foo", "extra", "x1") == "extra-3-foo-x1"
+    assert uv_conflict_name("Real_Time.Voice", "group", "Dev_Tools") == "group-15-real-time-voice-dev-tools"
+    assert uv_conflict_name("demo", "project") == "project-4-demo"
 
 
 def test_no_dev_checks_runtime_without_unrequested_optional_packages(fixtures):

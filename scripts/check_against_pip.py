@@ -137,7 +137,8 @@ def pip_platforms(target: Target) -> list[str]:
         return out + [f"linux_{arch}"]  # pip on Linux takes plain linux_<arch> too; PyPI allows it only for armv7l
     if family == "musllinux":
         major, minor = target.musl
-        return [f"musllinux_{major}_{m}_{arch}" for m in range(minor, -1, -1)]  # 1.2: musllinux_1_2 down to 1_0
+        # 1.2: musllinux_1_2 down to 1_0, and plain linux_<arch>, which pip takes on musl too
+        return [f"musllinux_{major}_{m}_{arch}" for m in range(minor, -1, -1)] + [f"linux_{arch}"]
     if family == "windows":
         return [arch]
     if family == "macos":

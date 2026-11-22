@@ -183,15 +183,31 @@ dependencies and default groups. Combine `--only-group` with `--group` to add mo
 
 Without any selector, a `uv.lock` is checked the way `uv sync --all-packages --all-extras --all-groups` installs it:
 every workspace member with all its extras and groups, and a dependency's extras only where some edge requests them on
-that target. Where a lock declares conflicting extras, which `uv sync --all-extras` refuses, wheelgap checks both
-sides.
+that target. Where a lock declares conflicting extras or groups (`[tool.uv] conflicts`), which `uv sync --all-extras`
+refuses, wheelgap checks both sides: every way of turning on none or one item of each conflict, as `uv sync
+--all-extras --no-extra ...` would, and a package counts if any of them installs it.
+
+**Conflict markers** (after 0.13.0): uv writes which side of a conflict a dependency needs into the lock's markers
+(`extra == 'extra-4-demo-old'` for the extra `old` of `demo`, `extra == 'group-4-demo-cpu'` for a group), with clauses
+that hold only when two sides of one conflict are on at once. wheelgap evaluates them as `uv sync` does: against the
+items each install turns on (the selected extras and groups of the packages it installs, and every extra a dependency
+asks for, such as `lib[cpu]`), so a package that only an install uv refuses would bring (pywin32 through
+`(sys_platform == 'win32' and extra == 'extra-4-demo-old') or (extra == 'extra-4-demo-new' and extra ==
+'extra-4-demo-old')` on Linux) is `n/a`, and `--extra old` checks the `old` side only. A project's own dependency groups are
+decided as `uv sync` decides them, before it follows any edges: an extra that a dependency turns on (`lib[cpu]`) is
+still off for them, so a group may bring a package of the other side too, as uv's install plan does. An install in which a
+dependency turns on a second extra of one conflict, which `uv sync` refuses, isn't counted. A selection that asks for two
+sides of one conflict (`--all-extras`, `--extra old --extra new`), which `uv sync` refuses, is checked like the
+default. A conflict between whole projects (`{ package = "a" }`), a `conflicts` table uv wouldn't write, or more than
+64 ways of picking the conflicts leave the conflict markers unknown, as in 0.13.0, so a package may be listed that no
+install needs.
 
 With selection enabled, rooted workspaces start at the root project (members outside the selection aren't checked,
 and a note on stderr names them); virtual workspaces start at their members. Dependency-requested extras are followed
 transitively, including local workspace dependencies, rather than enabling every extra of every dependency.
-Unresolved marker conditions (including uv's synthetic conflict markers and unknown OS releases) remain
-conservative: wheelgap can still report a possible gap rather than silently hide one. Selection itself needs no
-network.
+Unresolved marker conditions (such as unknown OS releases, and the conflict markers above that wheelgap doesn't work
+out) remain conservative: wheelgap can still report a possible gap rather than silently hide one. Selection itself
+needs no network.
 
 Default selections can go in [`[tool.wheelgap]`](configuration.md#extras) as `extras` and `groups`.
 

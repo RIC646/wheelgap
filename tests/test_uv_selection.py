@@ -226,6 +226,60 @@ def test_uv_conflicts_wheelgap_cannot_work_out_stay_unknown(tmp_path, conflicts)
     assert needed(tmp_path, lock)["linux-x86_64"] == {*BOTH, "pywin32 312"}
 
 
+# uv sync evaluates a root's group edges before its first walk, so an extra that an edge turns on later (lib[cpu]) is
+# still off for them (to_resolution_from_packages; its TODO). uv 0.13.1 writes this lock for a project that asks for
+# lib[cpu] and has a dev group needing portalocker, which lib's cpu and gpu extras pin apart, and `uv sync --dry-run`
+# plans both portalockers: 1.7.1 through lib[cpu] and 2.10.1 through the dev group.
+GROUP_BEFORE_WALK_LOCK = (
+    """
+version = 1
+revision = 5
+requires-python = ">=3.12"
+conflicts = [[{ package = "lib", extra = "cpu" }, { package = "lib", extra = "gpu" }]]
+[manifest]
+members = ["app", "lib"]
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "lib", extra = ["cpu"], marker = "extra == 'extra-3-lib-cpu'" }]
+[package.dev-dependencies]
+"""
+    + f"dev = [{OLD_172}, marker = \"extra == 'extra-3-lib-cpu'\" }}, "
+    + f"{NEW_2101}, marker = \"extra == 'extra-3-lib-gpu' or extra != 'extra-3-lib-cpu'\" }}]\n"
+    + """
+[[package]]
+name = "lib"
+version = "0.1.0"
+source = { editable = "lib" }
+[package.optional-dependencies]
+"""
+    + f"cpu = [{OLD_172} }}]\ngpu = [{NEW_2101} }}]\n"
+    + PORTALOCKER.format(old="sys_platform == 'win32'", new="sys_platform == 'win32'")
+)
+
+
+@pytest.mark.parametrize("selection", [None, UvSelection()])
+def test_uv_group_edges_see_only_the_roots_items(tmp_path, selection):
+    assert needed(tmp_path, GROUP_BEFORE_WALK_LOCK, selection)["linux-x86_64"] == BOTH
+
+
+def test_uv_project_conflict_markers_stay_unknown(tmp_path):
+    # `{ package = "a" }` conflicts: uv writes `extra == 'project-1-a'`, which used to read as false, hiding every
+    # package (`uv sync --package a` and `--package b` install them).
+    lock = (
+        'version = 1\nrevision = 5\nrequires-python = ">=3.12"\n'
+        'conflicts = [[{ package = "a" }, { package = "b" }]]\n[manifest]\nmembers = ["a", "b", "root"]\n'
+        '[[package]]\nname = "root"\nversion = "0.1.0"\nsource = { virtual = "." }\n'
+        f'[[package]]\nname = "a"\nversion = "0.1.0"\nsource = {{ editable = "a" }}\n'
+        f"dependencies = [{OLD_172}, marker = \"extra == 'project-1-a'\" }}]\n"
+        f'[[package]]\nname = "b"\nversion = "0.1.0"\nsource = {{ editable = "b" }}\n'
+        f"dependencies = [{NEW_2101}, marker = \"extra == 'project-1-b'\" }}]\n"
+        + PORTALOCKER.format(old="sys_platform == 'win32'", new="sys_platform == 'win32'")
+    )
+    assert needed(tmp_path, lock)["linux-x86_64"] == BOTH
+
+
 def test_uv_conflict_names():
     # uv's own examples: `extra-3-foo-x1` (universal_marker.rs), names normalized first.
     assert uv_conflict_name("foo", "extra", "x1") == "extra-3-foo-x1"

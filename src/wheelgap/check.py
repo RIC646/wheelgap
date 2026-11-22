@@ -581,7 +581,7 @@ def marker_value(
             return _evaluate3(m._markers, target, conflicts=conflicts)
         # uv's synthetic conflict marker names aren't public extra names: unknown, so a possibly needed wheel isn't
         # hidden, unless `conflicts` says which of them are on.
-        synthetic = bool(re.search(r"(?:extra|group)-\d+-", marker))
+        synthetic = bool(re.search(r"(?:extra|group|project)-\d+-", marker))
         contexts = extras | {""} if extras is not None and not synthetic else {None}
         results: set[bool | None] = set()
         for extra in contexts:
@@ -825,7 +825,7 @@ def _conflict_worlds(
         for _ in range(len(known) + 2):
             world = ConflictWorld(active, known)
             found_paths: dict[int, list[str]] = {}
-            found, turned_on = _uv_walk(source, target, found_paths, world, dropped)
+            found, turned_on = _uv_walk(source, target, found_paths, world, dropped, start)
             if turned_on <= active:
                 break
             active |= turned_on
@@ -865,9 +865,11 @@ def _uv_walk(
     paths: dict[int, list[str]] | None = None,
     world: ConflictWorld | None = None,
     dropped: frozenset[str] = frozenset(),
+    early: frozenset[str] = frozenset(),
 ) -> tuple[dict[int, Parent], frozenset[str]]:
     """_uv_reachable's walk, and with a conflict `world` the conflict items its edges turn on (`pkg[x]`). `dropped`:
-    conflict items of the roots the pick leaves off (their extras and groups aren't followed)."""
+    conflict items of the roots the pick leaves off (their extras and groups aren't followed). `early`: the items uv
+    has on when it evaluates the roots' group edges, before its first walk (the roots' selected extras and groups)."""
     selection = source.uv_selection
     everything = selection is None
     if selection is None:
@@ -879,6 +881,7 @@ def _uv_walk(
     for i, package in enumerate(source.packages):
         by_name.setdefault(package.key, []).append(i)
     turned_on: set[str] = set()
+    group_on: set[str] = set()  # extras the roots' group edges turned on so far, in uv's order
     parents: dict[int, Parent] = {}
     active: dict[int, frozenset[str]] = {}
     queue: deque[tuple[int, frozenset[str], list[str]]] = deque()
@@ -906,11 +909,18 @@ def _uv_walk(
                 # uv counts an edge's own extras as on for its marker, and turns them on (except for the manifest's
                 # requirements); it evaluates the manifest's edges with nothing on.
                 own = frozenset(uv_conflict_name(dependency["name"], "extra", e) for e in requested) & world.known
-                conflicts = ConflictWorld(frozenset() if manifest else world.active | own, world.known)
+                if manifest == "root-group":
+                    # uv evaluates a root's group edges before its first walk, with only the roots' selected items
+                    # and the extras earlier group edges turned on (to_resolution_from_packages; its TODO).
+                    conflicts = ConflictWorld(early | group_on | own, world.known)
+                else:
+                    conflicts = ConflictWorld(frozenset() if manifest else world.active | own, world.known)
             if not marker_holds(dependency.get("marker"), target, extras=extras, groups=groups, conflicts=conflicts):
                 continue
             if world is not None and manifest != "requirements":
                 turned_on.update(own)
+                if manifest == "root-group":
+                    group_on.update(own)
             candidates = _narrow_candidates(
                 source,
                 by_name.get(canonicalize_name(dependency["name"]), []),
@@ -942,7 +952,9 @@ def _uv_walk(
     for i in roots:
         for name, group in packages[i].get("dev-dependencies", {}).items():
             if canonicalize_name(name) in groups and not off(i, "group", name):
-                follow(group, canonicalize_name(name), frozenset(), [f"({canonicalize_name(name)} group)"])
+                follow(
+                    group, canonicalize_name(name), frozenset(), [f"({canonicalize_name(name)} group)"], "root-group"
+                )
     for name, group in source.uv_manifest.get("dependency-groups", {}).items():
         if canonicalize_name(name) in groups:
             follow(group, canonicalize_name(name), frozenset(), [f"({canonicalize_name(name)} group)"], "group")

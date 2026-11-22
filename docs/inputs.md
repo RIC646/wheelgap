@@ -193,7 +193,9 @@ that hold only when two sides of one conflict are on at once. wheelgap evaluates
 items each install turns on (the selected extras and groups of the packages it installs, and every extra a dependency
 asks for, such as `lib[cpu]`), so a package that only an install uv refuses would bring (pywin32 through
 `(sys_platform == 'win32' and extra == 'extra-4-demo-old') or (extra == 'extra-4-demo-new' and extra ==
-'extra-4-demo-old')` on Linux) is `n/a`, and `--extra old` checks the `old` side only. An install in which a
+'extra-4-demo-old')` on Linux) is `n/a`, and `--extra old` checks the `old` side only. A project's own dependency groups are
+decided as `uv sync` decides them, before it follows any edges: an extra that a dependency turns on (`lib[cpu]`) is
+still off for them, so a group may bring a package of the other side too, as uv's install plan does. An install in which a
 dependency turns on a second extra of one conflict, which `uv sync` refuses, isn't counted. A selection that asks for two
 sides of one conflict (`--all-extras`, `--extra old --extra new`), which `uv sync` refuses, is checked like the
 default. A conflict between whole projects (`{ package = "a" }`), a `conflicts` table uv wouldn't write, or more than

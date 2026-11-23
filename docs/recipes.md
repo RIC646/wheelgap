@@ -392,7 +392,7 @@ puresdist 1.0 on linux-aarch64: ● source
 
 skipped 2 non-index packages: demo (editable), gitdep (git)
 3 of 5 packages have gaps: 3 will build from source.
-Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.
+Run with --fix for a way out: an upgrade where a newer release has the wheel, else wheelgap's gap wheel index.
 ```
 
 Source builds are acceptable here, so check that nothing fails to install:
@@ -417,7 +417,21 @@ It works with pip and uv. uv's default [first-index strategy](https://docs.astra
 
 ### Which gaps it fills: `--fix`
 
-`wheelgap --fix` checks as usual, then reads the index's list of wheels (one request to wheelgap.github.io that names
+**After 0.13.0**, `--fix` first looks for an upgrade: most gaps on a new Python are in packages whose latest release
+already has the wheel (PyYAML 6.0.3 has no CPython 3.15 wheel, 6.0.4 does). For each gap it names the nearest newer
+release with the wheel, the same one [`--suggest`](cli.md#suggest) would, and what to run for the input
+(`uv lock --upgrade-package pyyaml` for a uv.lock, the new pin for a requirements file); a gap wheel is only the
+fallback for a package you can't upgrade, and a summary counts the gaps each way fixes:
+
+```bash
+wheelgap requirements.txt -p 3.15 -t linux-x86_64 --fix
+```
+
+wheelgap doesn't resolve, so check that the rest of the dependencies allow the upgrade: uv says so when
+`uv lock --upgrade-package` can't, and pip when it installs. These lookups go to pypi.org, only for packages
+[positively from PyPI](how-it-works.md#pypi-origin).
+
+For the gaps no upgrade fixes, `wheelgap --fix` checks as usual, then reads the index's list of wheels (one request to wheelgap.github.io that names
 no package) and lists the gaps one of them fills, with how to install it:
 
 ```bash
@@ -437,7 +451,8 @@ pip advice if the packages come from PyPI: pip treats every index alike, and whe
 `pip.conf`. uv's `exclude-newer` won't see these packages' files on this index: its pages
 are HTML, which carries no upload times. `--fix` is refused with `--offline`, and reads nothing with `--index-url` or
 a `WHEELGAP_INDEX_URL` mirror. With `--json`, the [`gap_wheels`](output.md#fix) key lists each wheel with its URL and
-SHA-256.
+SHA-256, and (**after 0.13.0**) each package's `fix` says, per gap target, whether an upgrade, a gap wheel or nothing
+fixes it.
 
 ### GitHub Actions
 

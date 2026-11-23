@@ -186,7 +186,7 @@ for `check_dist` the nearest folder above the dist folder with a
 | `groups` | array of strings | `[tool.wheelgap] groups`, else every group of a lockfile, none of a `pyproject.toml` | Include these dependency groups, as `--group NAME` (`uv.lock`, Poetry 2.x `poetry.lock`, `pdm.lock`, or `pyproject.toml` `[dependency-groups]`). |
 | `only_groups` | array of strings | none | Check only these dependency groups, as `--only-group NAME`: the project's own dependencies are left out unless a group names them. |
 | `no_dev` | boolean | `false` | Leave out the `dev` group, as `--no-dev` (`uv.lock`, Poetry 2.x `poetry.lock`, `pdm.lock`; refused for `pyproject.toml`, where no group is checked unless selected). |
-| `fix` | boolean | `false` | Also return `gap_wheels`: the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, as `--fix` does. One request to wheelgap.github.io that names no package. Refused with `offline`. See [Gap wheels](#gap-wheels-fix). |
+| `fix` | boolean | `false` | Also return `gap_wheels`: the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, as `--fix` does. One request to wheelgap.github.io that names no package. After 0.13.0, also each gap's `fix` (a newer release with the wheel first), with one pypi.org request per gap package from PyPI. Refused with `offline`. See [Gap wheels](#gap-wheels-fix). |
 
 With none of these and no `[tool.wheelgap] extras` or `groups`, a `uv.lock`, `poetry.lock` or `pdm.lock` is checked
 for every extra and group, which may report gaps the deployment never installs. Match the deployment explicitly, for
@@ -206,7 +206,7 @@ leaving the argument out. Other inputs (requirements files, `Pipfile.lock`, `pyl
 | `context` | string | the Dockerfile's folder | With `inputs: true`, absolute path or `file://` URI of the folder the build context starts from, as `--dockerfile-context DIR` (for `docker build -f docker/Dockerfile .`, the folder that `.` is). |
 | `build_args` | object (string values) | `{}` | The build's `--build-arg` values, e.g. {'PYTHON_VERSION': '3.13'}: each replaces the default of the global ARG it names, as in docker build. |
 | `targets` | array of strings | the image's platform | Platforms to check instead of the image's, e.g. ['linux/arm64'] (with an Alpine image, Docker platforms mean musl). |
-| `fix` | boolean | `false` | Also return `gap_wheels`: the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, as `--fix` does. One request to wheelgap.github.io that names no package. See [Gap wheels](#gap-wheels-fix). |
+| `fix` | boolean | `false` | Also return `gap_wheels`: the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, as `--fix` does. One request to wheelgap.github.io that names no package. After 0.13.0, also each gap's `fix` (a newer release with the wheel first), with one pypi.org request per gap package from PyPI. See [Gap wheels](#gap-wheels-fix). |
 
 With `inputs: true` the tool answers "will this image build without compiling anything?" in one call, as
 `wheelgap --dockerfile DOCKERFILE --dockerfile-inputs --json` does: it checks the requirements files the final
@@ -273,10 +273,14 @@ No arguments.
 - `gap_wheels`: one entry per filled gap cell, with `name`, `version`, `target` (labelled like `results`, e.g.
   `"3.14 win-arm64"`), `wheel`, `url` and `sha256`. It's `[]` when no gap wheel fits, and `notes` says why;
 - `gap_wheel_index`: the index to install from (`https://wheelgap.github.io/wheels/simple/`);
-- `gap_wheel_about`: the page on how the wheels are built and checked.
+- `gap_wheel_about`: the page on how the wheels are built and checked;
+- (**after 0.13.0**) each entry of `gaps` gets `fix`, by target (labelled like `results`): its way out, as
+  [`packages[].fix`](output.md#fix) of `--json --fix`: `upgrade` (a newer release has the wheel, with `version` and
+  `how`) first, then `gap_wheel`, else `none` with a `reason`; and `fix_summary` counts them.
 
 Without `fix`, none of these keys are returned and nothing is requested. With it, the server makes one request to
-wheelgap.github.io that names no package. The wheels are unofficial: wheelgap builds them from the PyPI sdist, the
+wheelgap.github.io that names no package, and (**after 0.13.0**) one request to pypi.org per gap package positively
+from PyPI, for its release list, as `--suggest` does. The wheels are unofficial: wheelgap builds them from the PyPI sdist, the
 package's maintainers don't. The agent should tell the user that, and ask before adding the index to project files
 (the tools never write files themselves). `fix` never changes `gaps`, `ok` or `passes`: they still report what PyPI
 has. It's off with another index (`index-url` in `[tool.wheelgap]` or a `WHEELGAP_INDEX_URL` mirror), with a note,

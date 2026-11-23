@@ -135,8 +135,9 @@ the requirement that pulls it in when exactly one does on every target where it 
 isn't certain, the annotation names the file without a line and the message names them all. See
 [GitHub annotations](cli.md#github-annotations) for the full rules.
 
-With [`--fix`](cli.md#fix) in `args` (**after 0.13.0**), the annotation of a package that a gap wheel fills gets one
-more sentence, naming the targets it fills; see [below](#fix).
+With [`--fix`](cli.md#fix) in `args` (**after 0.13.0**), the annotation of a package that a newer official release
+fixes names that release first, and the annotation of a package that a gap wheel fills gets one more sentence, naming
+the targets it fills (as the fallback, "If you can't upgrade", when there's an upgrade too); see [below](#fix).
 
 With `--dockerfile-inputs`, each annotation ends with `(installed by Dockerfile:4)`. **After 0.13.0**, when the package
 is in a file included with `-r` (at any depth), it also names the file on the `RUN` line it comes through, relative to

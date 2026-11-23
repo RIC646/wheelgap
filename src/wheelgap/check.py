@@ -220,6 +220,10 @@ def _platform_reason(plat: str, target: Target) -> str:
     return f"{plat} doesn't match {target.platform}"
 
 
+# --explain's reason for an abi3 wheel on a free-threaded target; --fix names it for a gap with no fix (fix.abi3_only).
+ABI3_ON_FREETHREADED = "abi3 wheels can't be used on free-threaded Python (only abi3t ones can)"
+
+
 def rejection(filename: str, target: Target) -> str | None:
     """Why `target` can't install this wheel, or None if it can."""
     wheel = _parsed_tags(filename)
@@ -235,7 +239,7 @@ def rejection(filename: str, target: Target) -> str | None:
                 minors = [int(t.interpreter[3:]) for t in stable if t.interpreter[3:].isdigit()]
                 return f"abi3t wheels need CPython 3.{min(minors)}+ (free-threaded)" if minors else "abi3t wheel"
             if any(t.abi == "abi3" for t in wheel):
-                return "abi3 wheels can't be used on free-threaded Python (only abi3t ones can)"
+                return ABI3_ON_FREETHREADED
         built = ", ".join(sorted({f"{t.interpreter}-{t.abi}" for t in wheel}))
         return f"built for {built}, not CPython {target.python}"
     # Name the tag closest to the target: same arch first, and the modern manylinux_2_17_* form

@@ -590,7 +590,44 @@ empty `FILE` is an error, as for `--junit`.
 
 ### `--fix` {#fix}
 
-**After 0.13.0.** Following the usual output, say which gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/)
+**After 0.13.0.** Following the usual output, say how to fix each gap cell (a package on a target, `source` or
+`missing`, not `--ignore`d), in order of preference:
+
+1. **Upgrade** to an official release: the nearest newer release with a wheel for that target, as
+   [`--suggest`](#suggest) names it (not yanked, `Requires-Python` admitting the target's Python, no pre-release unless
+   the pin is one, and keeping a wheel on every target the package has one on now), with what to run or change for the
+   input: `uv lock --upgrade-package NAME` for a uv.lock (`uv lock --script SCRIPT --upgrade-package NAME` for a
+   script's lock; a bare name, since uv applies `NAME==VERSION` to every Python the lock covers, then check it reached
+   VERSION), the new pins for a requirements file, in the file whose line pins the package (a `-r` include's own file;
+   for one that pins hashes, `pip-compile --upgrade-package NAME==VERSION` or `uv pip compile --upgrade-package
+   NAME==VERSION` to regenerate it), `poetry update NAME` or
+   `pdm update NAME` for those locks (they stay within `pyproject.toml`'s constraints, so check the release they pick),
+   and "upgrade NAME to VERSION" for the other lockfiles. Where wheelgap reads your own requirement for the package (a
+   uv.lock project's dependencies, dependency groups and `[manifest]` constraints, or a ranged requirement in a
+   requirements file, `pyproject.toml`, script or the command line, as written, or a requirements file's `-c`
+   constraints), it says whether the release is within it or the requirement needs relaxing; otherwise it says
+   nothing. A package whose targets need different releases (no one release has wheels for all of them) gets no pin:
+   a line names each target's release instead. wheelgap doesn't resolve, so the rest of the dependencies must allow
+   the release.
+2. **Gap wheel**: when no newer release has the wheel, an unofficial wheel of the pinned version from wheelgap's gap
+   wheel index, as below. When both exist, the upgrade comes first and the gap wheel is listed as the fallback
+   ("if you can't upgrade NAME"); the gap wheel section opens with "As a fallback" when `--fix` names an upgrade.
+3. **No fix yet**, with the reason (no newer release has a wheel; every one that has drops a wheel elsewhere, naming
+   what the nearest one drops; or `--no-binary`), the package's issue tracker where no newer release has a wheel, and,
+   on a free-threaded target whose release has only abi3 wheels, a line saying so. For a uv.lock, when what the newer
+   releases drop is only an older Python's wheel because their `Requires-Python` leaves that Python out, uv may lock a
+   release per Python: such a gap goes under "Maybe, with uv:", with `uv lock --upgrade-package NAME` to try (and the
+   folder to run it in), or `uv lock --script SCRIPT --upgrade-package NAME` for a script's lock; not when your own
+   requirement leaves that release out, which the "No fix yet" line then names.
+
+A summary at the top counts them (`--fix: 6 gaps (3 packages × their targets): 4 can be fixed by upgrading to an
+official release; 2 only by an unofficial gap wheel; 0 have no fix yet.`); only upgrades count as fixed, and gaps
+whose releases weren't looked up are counted apart (`N weren't checked for an upgrade`), since they aren't known to
+have no fix. The releases are looked up on pypi.org, one request per package, as for `--suggest` (and once for both
+when you pass both), only for packages that pass [the PyPI-origin rule](how-it-works.md#pypi-origin); for the others,
+and with another index, a line says they weren't looked up and why.
+
+For the gap wheels, it says which gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/)
 fills, and how to install from it: a `[tool.uv.index]` and `[tool.uv.sources]` snippet for `pyproject.toml` with a
 uv.lock input, the same entries for the `# /// script` block of a script (or of the script beside a script's lock,
 `example.py.lock`, then `uv lock --script example.py`), and an `--extra-index-url` line for pip otherwise. A cell counts only when it's `source` or `missing`
@@ -604,11 +641,13 @@ empty-fill note always names the UTC time the list was fetched. It never
 changes a status, the summary or the exit code: wheelgap still reports what PyPI has. `--offline` refuses the flag
 with an error; with `--index-url`, `index-url` in `[tool.wheelgap]` or a `WHEELGAP_INDEX_URL` mirror it's off and
 reads nothing. If the list can't be read, a note on stderr says so. With `--json` it adds
-[`gap_wheels`](output.md#fix). There's no config key for it.
+[`gap_wheels`](output.md#fix), and (**after 0.13.0**) each package's `fix` and the top-level `fix_summary`. There's no
+config key for it.
 See [Installing from the gap wheel index](recipes.md#installing-from-the-gap-wheel-index).
 
-With `--explain` too (**after 0.13.0**), each package a gap wheel fills gets a `gap wheel` line under its first filled
-target, naming the targets it fills and saying the wheel is unofficial: built by wheelgap from the PyPI sdist, not from
+With `--explain` too (**after 0.13.0**), a target a newer official release fixes gets an `upgrade:` line first, and
+each package a gap wheel fills gets a `gap wheel` line under its first filled
+target (starting `if you can't upgrade, ` when an upgrade fixes one of them), naming the targets it fills and saying the wheel is unofficial: built by wheelgap from the PyPI sdist, not from
 the package's maintainers. For inputs pip installs from as they are (a requirements file, a `pyproject.toml`, a pip
 report, an `environment.yml`'s `pip:` list or package names) it gives the `pip install --extra-index-url` command;
 for a lockfile it points to the `--fix` section, since that lockfile's own tool has to pick the index up, and for a
@@ -695,8 +734,10 @@ it has a gap, and its message says `(via …)`. When more than one does, or a
 line isn't certain, the annotation names the file without a line, and the
 message names them all.
 
-With [`--fix`](#fix) too (**after 0.13.0**), the annotation of a package that a gap wheel fills gets one more
-sentence: the targets the wheel fills, that it's unofficial (built by wheelgap from the PyPI sdist), and the
+With [`--fix`](#fix) too (**after 0.13.0**), the annotation of a package that a newer official release fixes starts
+its fix with that (`Upgrade: NAME VERSION has the wheel for TARGETS (an official release); the --fix section of the log
+says how.`), and the annotation of a package that a gap wheel fills gets one more sentence (after the upgrade, it
+starts `If you can't upgrade:`): the targets the wheel fills, that it's unofficial (built by wheelgap from the PyPI sdist), and the
 `pip install --extra-index-url` command for inputs pip installs from as they are, or a pointer to the log's gap wheel
 section for a lockfile or a script. The level, title, line and exit code stay the same; see
 [CI](ci.md#fix).

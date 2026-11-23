@@ -68,6 +68,8 @@ class Package:
     markers: list[str] | None = None
     # A version range that isn't an exact pin (numpy>=1.26,<2): the index picks the newest match.
     spec: str | None = None
+    # `spec` with its clauses in the order the requirement writes them (packaging sorts them), for --fix to show.
+    written_spec: str | None = None
     # Files of a pinned release that the index marks as yanked (see check.status_for).
     yanked: frozenset[str] = frozenset()
     # uv.lock / pylock.toml / poetry.lock / Pipfile.lock: the index the lock says the package came from, e.g.
@@ -1940,7 +1942,21 @@ def requirement_to_package(text: str, origin: str, hashes: frozenset[str] = froz
         return Package(req.name, None, skip="url", origin=origin, markers=markers, hashes=hashes)
     version = _pinned_version(req)
     spec = str(req.specifier) if req.specifier and version is None else None
-    return Package(req.name, version, origin=origin, markers=markers, spec=spec, hashes=hashes)
+    written = _as_written(text, req.specifier) if spec else None
+    return Package(req.name, version, origin=origin, markers=markers, spec=spec, hashes=hashes, written_spec=written)
+
+
+def _as_written(text: str, specifier: SpecifierSet) -> str:
+    """The specifier's clauses in the order `text` writes them, or packaging's order when that can't be told (a clause
+    that isn't found exactly once)."""
+    flat = re.sub(r"\s+", "", text.split(";", 1)[0])
+    found = []
+    for clause in specifier:
+        hits = [m.start() for m in re.finditer(re.escape(str(clause)) + r"(?=,|\)|$)", flat)]
+        if len(hits) != 1:
+            return str(specifier)
+        found.append((hits[0], str(clause)))
+    return ",".join(clause for _, clause in sorted(found))
 
 
 # "name @ url", "name@url" and "name[extra] @ url": PEP 508 direct references, which Requirement parses.

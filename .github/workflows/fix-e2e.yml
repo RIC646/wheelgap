@@ -15,9 +15,12 @@ name: Fix end-to-end
 # - windows: GitHub's Windows runners have MSVC (and gcc, clang and cargo on PATH), so a plain install there can build
 #   from source. It shows instead that PyPI has no wheel (pip install --only-binary=:all: fails), and that the --fix
 #   install takes our wheels, from pip's --report, rather than building.
+# - linux-upgrade, windows-upgrade: pins a newer official release fixes (markupsafe 3.0.2 -> 3.0.4, PyYAML 6.0.3 ->
+#   6.0.4): --fix must lead with the upgrade, and the pin line it prints, applied literally, must install PyPI's own
+#   cp315 wheels with --only-binary=:all:.
 #
 # It needs PyPI and wheelgap.github.io, so it's kept out of CI's offline test job: it runs weekly, by hand, and on
-# pull requests that change --fix's output (gapwheels.py) or this check. Read-only and no secrets.
+# pull requests that change --fix's output (fix.py, gapwheels.py, suggest.py) or this check. Read-only and no secrets.
 
 on:
   schedule:
@@ -27,7 +30,9 @@ on:
     paths:
       - .github/workflows/fix-e2e.yml
       - scripts/fix_e2e.py
+      - src/wheelgap/fix.py
       - src/wheelgap/gapwheels.py
+      - src/wheelgap/suggest.py
 
 permissions:
   contents: read
@@ -93,3 +98,31 @@ jobs:
       - name: Without and with --fix
         shell: bash
         run: python scripts/fix_e2e.py plain -t win-amd64 --expect lz4,zstandard --pypi-only only-binary
+
+  linux-upgrade:
+    name: linux, upgrade first
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: python:3.15-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: --fix's upgrade, applied as printed
+        shell: bash
+        run: python scripts/fix_e2e.py upgrade -t linux-x86_64 --expect markupsafe,pyyaml
+
+  windows-upgrade:
+    name: windows, upgrade first
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+      - name: --fix's upgrade, applied as printed
+        shell: bash
+        run: python scripts/fix_e2e.py upgrade -t win-amd64 --expect markupsafe,pyyaml

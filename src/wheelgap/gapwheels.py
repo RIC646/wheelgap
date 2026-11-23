@@ -198,6 +198,17 @@ def to_json(fills: list[Fill], multi_py: bool) -> list[dict]:
 
 
 UNOFFICIAL = "unofficial, built by wheelgap from the PyPI sdist; not from the package's maintainers"
+# --fix's gap wheel section: after the upgrades to official releases, so the fallback.
+HEAD = (
+    "wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the "
+    "packages' maintainers) for:"
+)
+# The same after --fix's upgrades to official releases, which come first.
+FALLBACK_HEAD = "As a fallback, " + HEAD
+
+
+def head(upgrades: bool) -> str:
+    return FALLBACK_HEAD if upgrades else HEAD
 
 
 def pip_install(fill: Fill) -> str | None:
@@ -208,12 +219,13 @@ def pip_install(fill: Fill) -> str | None:
     return f"pip install --extra-index-url {INDEX} {fill.row.package.name}=={fill.row.package.version}"
 
 
-def explain_lines(fills: list[Fill], multi_py: bool) -> list[str]:
+def explain_lines(fills: list[Fill], multi_py: bool, fallback: bool = False) -> list[str]:
     """--explain --fix: the hint under a release's first filled target. `fills`: all of that release's, which come
-    from one input."""
+    from one input. `fallback`: an upgrade fixes one of those targets too, so the gap wheel is for when it can't."""
     on = ", ".join(dict.fromkeys(f.target.label(multi_py) for f in fills))
     how = pip_install(fills[0]) or "see the gap wheel section below for how to use it"
-    return [f"gap wheel for {on}: {UNOFFICIAL}", f"  {how}"]
+    first = "if you can't upgrade, " if fallback else ""
+    return [f"{first}gap wheel for {on}: {UNOFFICIAL}", f"  {how}"]
 
 
 def explain_json(fill: Fill) -> dict[str, str]:
@@ -268,14 +280,27 @@ def _uv_direct_note(name: str, fills: list[Fill], code: Callable[[str], str] = _
     return f"wheelgap can't tell whether {code(name)} is a direct dependency; " + add.format("to be safe ") + " as one"
 
 
+def _listed(name: str, version: str, fs: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]]) -> str:
+    """`foo 1.0: win-arm64`, ending in `(if you can't upgrade foo)` when --fix leads with an upgrade for those cells
+    (`fallback`: their (id(row), target)), or naming the targets that's so for when it's only some."""
+    labels = list(dict.fromkeys(f.target.label(multi_py) for f in fs))
+    line = f"{name} {version}: {', '.join(labels)}"
+    behind = list(dict.fromkeys(f.target.label(multi_py) for f in fs if (id(f.row), f.target) in fallback))
+    if behind == labels:
+        return f"{line} (if you can't upgrade {name})"
+    if behind:
+        return f"{line} ({', '.join(behind)} only if you can't upgrade {name})"
+    return line
+
+
 def _parts(
-    fills: list[Fill], multi_py: bool, code: Callable[[str], str] = _plain
+    fills: list[Fill],
+    multi_py: bool,
+    code: Callable[[str], str] = _plain,
+    fallback: Collection[tuple[int, Target]] = frozenset(),
 ) -> tuple[list[str], list[str], list[str], bool]:
     """(one line per package, the uv config lines, the uv notes, whether the pip way applies)."""
-    listed = [
-        f"{name} {version}: {', '.join(dict.fromkeys(f.target.label(multi_py) for f in fs))}"
-        for (name, version), fs in _by_package(fills).items()
-    ]
+    listed = [_listed(name, version, fs, multi_py, fallback) for (name, version), fs in _by_package(fills).items()]
     uv_names: dict[str, list[Fill]] = {}  # by canonical name: one sources line per package
     pip = False
     for f in fills:
@@ -426,12 +451,16 @@ def project_snippet_lines(fills: list[Fill], source: Source, multi_py: bool) -> 
     ]
 
 
-def text_lines(fills: list[Fill], multi_py: bool) -> list[str]:
-    """--fix's section of the text output (empty when nothing is fillable)."""
+def text_lines(
+    fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]] = frozenset(), upgrades: bool = False
+) -> list[str]:
+    """--fix's section of the text output (empty when nothing is fillable). `fallback`: the (id(row), target) cells an
+    upgrade fixes too (fix.alternatives), where the gap wheel is for when the package can't be upgraded; `upgrades`:
+    whether --fix's section names an upgrade at all, which then comes first."""
     if not fills:
         return []
-    listed, config, notes, pip = _parts(fills, multi_py)
-    out = ["", "wheelgap's gap wheel index has wheels PyPI lacks for:"]
+    listed, config, notes, pip = _parts(fills, multi_py, fallback=fallback)
+    out = ["", head(upgrades)]
     out += [f"  {line}" for line in listed]
     if config:
         out += ["", "To install them with uv, add this to pyproject.toml, then run uv lock:", "", *config, ""]
@@ -465,12 +494,14 @@ def text_lines(fills: list[Fill], multi_py: bool) -> list[str]:
     return out
 
 
-def markdown_lines(fills: list[Fill], multi_py: bool) -> list[str]:
-    """--fix's section of the Markdown report (empty when nothing is fillable)."""
+def markdown_lines(
+    fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]] = frozenset(), upgrades: bool = False
+) -> list[str]:
+    """--fix's section of the Markdown report (empty when nothing is fillable); `fallback` as for text_lines."""
     if not fills:
         return []
-    listed, config, notes, pip = _parts(fills, multi_py, _code)
-    out = ["#### Gap wheels", "", "wheelgap's gap wheel index has wheels PyPI lacks for:", ""]
+    listed, config, notes, pip = _parts(fills, multi_py, _code, fallback)
+    out = ["#### Gap wheels", "", head(upgrades), ""]
     out += [f"- `{line}`" for line in listed]  # valid names and versions, and target labels: no backticks
     out.append("")
     if config:

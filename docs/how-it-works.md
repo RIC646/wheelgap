@@ -132,9 +132,10 @@ points the JSON API lookups at a mirror; see [Pipfile.lock](inputs.md#pipfileloc
 
 Five opt-in flags send the names of packages with gaps somewhere other than the index: `--conda-forge` to
 anaconda.org, `--piwheels` to piwheels.org, `--notes` to wheelgap.github.io, `--build-info` to PyPI's file host, for
-the sdist, and `--suggest` to PyPI's JSON API, for the package's list of releases. A name from a private index must
-never leave the run, so all five send a package's name only when wheelgap knows the package is PyPI's. That's one
-rule, shared by the five, and it holds when all of these do:
+the sdist, and `--suggest` to PyPI's JSON API, for the package's list of releases. **After 0.13.0**, `--fix` sends the
+same names as `--suggest`, for the same list of releases (its upgrade lookups; one request per package however many
+of the two flags ask). A name from a private index must never leave the run, so all of them send a package's name
+only when wheelgap knows the package is PyPI's. That's one rule, shared by them all, and it holds when all of these do:
 
 - **Lookups go to pypi.org:** no `--index-url` (or `index-url` in `[tool.wheelgap]`) and no `WHEELGAP_INDEX_URL`
   pointing at another index. With either, none of the five sends anything, and a note on stderr says so.
@@ -179,8 +180,10 @@ Each flag then adds its own limits:
 - **`--notes`** takes the recorded-index route only from `uv.lock` and `pylock.toml`, and is off with `--offline`
   (or `offline = true`).
 - **`--fix`** follows the rule as it is, with a note naming the packages it didn't check, and is refused with
-  `--offline` (or `offline = true`). It sends no names at all, but it suggests installing from another index, so the
-  rule decides which packages it may suggest that for. The settings it can't read matter more here: pip treats every
+  `--offline` (or `offline = true`). Its gap wheel list is one request that names no package, but it suggests
+  installing from another index, so the rule decides which packages it may suggest that for. **After 0.13.0** its
+  upgrade lookups send the names `--suggest` would, by the same rule, and its section says in one line which packages'
+  releases weren't looked up, and why. The settings it can't read matter more here: pip treats every
   index alike, so with a private index in `pip.conf` a private package with the same name and version as one on the
   gap wheel index could install the gap wheel. Don't follow its pip advice in that setup.
 - **`--build-info`** is off for the whole run when an environment variable above is set, as well as with

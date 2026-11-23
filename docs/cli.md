@@ -67,7 +67,9 @@ final stage, such as `FROM python:3.13-alpine`. `-p`, `-t`, `--glibc` and `--mus
 [From a Dockerfile](targets.md#from-a-dockerfile).
 
 **After 0.13.0**, `-p` and `-t` together also stand in for an image wheelgap can't read: `FROM ubuntu:24.04`,
-`nvidia/cuda`, `node`, a python tag that names no version, or a `FROM` whose build argument has no value. In 0.13.0
+`nvidia/cuda`, `node`, a python tag that names no version, a `FROM` whose build argument has no value, or a heredoc
+that an old `# syntax=` line may read differently (not with `--dockerfile-inputs`, which needs to know which lines
+are instructions: there, drop the `# syntax=` line or set it to `docker/dockerfile:1`). In 0.13.0
 that is an error even with both flags. Nothing is taken from such an image, and a note that `--quiet` doesn't hide
 (also in `--json`, as [`dockerfile_notes`](output.md#json)) says what the Dockerfile then leaves unknown: which
 Python the image's `pip` installs for and which pip version it has, the image's glibc or musl version (pass

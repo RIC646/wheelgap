@@ -359,14 +359,25 @@ SCRIPT_MERGE = "If the block already has a [tool.uv.sources] table, add these li
 
 
 def _hashes(fills: list[Fill]) -> list[tuple[str, str]]:
-    """(name==version, sha256) per pip-way wheel, for requirements files that pin hashes."""
-    return list(
-        dict.fromkeys(
-            (f"{f.row.package.name}=={f.row.package.version}", f.wheel.sha256)
-            for f in fills
-            if f.source.kind in PIP_KINDS
-        )
-    )
+    """(name==version, its wheels' --hash options) per pip-way package, for requirements files that pin hashes.
+
+    One entry per package, with every gap wheel's hash: they go on the package's existing line. pip takes a second
+    line for the same package as another requirement and allows only the hashes all its lines share (pip's
+    resolvelib Factory._iter_found_candidates, `hashes &= ireq.hashes(...)`), so on a line of their own these
+    hashes are never allowed."""
+    by_req: dict[str, list[str]] = {}
+    for f in fills:
+        if f.source.kind in PIP_KINDS:
+            shas = by_req.setdefault(f"{f.row.package.name}=={f.row.package.version}", [])
+            if f.wheel.sha256 not in shas:
+                shas.append(f.wheel.sha256)
+    return [(req, " ".join(f"--hash=sha256:{sha}" for sha in shas)) for req, shas in by_req.items()]
+
+
+HASHES_HOW = (
+    "If the requirements pin hashes, add these hashes to each package's existing line, keeping the ones it has "
+    "(on a second line for the same package, pip won't use them):"
+)
 
 
 PIP_CAVEAT = (
@@ -408,8 +419,9 @@ def project_snippet_lines(fills: list[Fill], source: Source, multi_py: bool) -> 
         f"# {PIP_CAVEAT}",
         f"--extra-index-url {INDEX}",
         *(
-            f"# If the requirements pin hashes, add --hash=sha256:{sha} to the {req} line."
-            for req, sha in _hashes(fills)
+            f"# If the requirements pin hashes, add {opts} to the existing {req} line, keeping the hashes it has "
+            "(not as a line of its own, which pip won't use)."
+            for req, opts in _hashes(fills)
         ),
     ]
 
@@ -432,8 +444,8 @@ def text_lines(fills: list[Fill], multi_py: bool) -> list[str]:
             f"  --extra-index-url {INDEX}",
             "or pass it to pip install:",
             f"  pip install --extra-index-url {INDEX} ...",
-            "If the requirements pin hashes, also add each wheel's hash to its line:",
-            *(f"  {req} --hash=sha256:{sha}" for req, sha in _hashes(fills)),
+            HASHES_HOW,
+            *(f"  {req} {opts}" for req, opts in _hashes(fills)),
             PIP_CAVEAT,
         ]
     for label, lines, script_notes, relock in _script_parts(fills):
@@ -479,10 +491,10 @@ def markdown_lines(fills: list[Fill], multi_py: bool) -> list[str]:
             f"--extra-index-url {INDEX}",
             "```",
             "",
-            "If the requirements pin hashes, also add each wheel's hash to its line:",
+            HASHES_HOW,
             "",
             "```",
-            *(f"{req} --hash=sha256:{sha}" for req, sha in _hashes(fills)),
+            *(f"{req} {opts}" for req, opts in _hashes(fills)),
             "```",
             "",
             PIP_CAVEAT,

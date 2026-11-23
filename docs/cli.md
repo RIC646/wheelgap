@@ -622,8 +622,10 @@ package and the targets it fills. The exit code is the check's own, so a run wit
 snippet; when no gap wheel fits, stdout is empty.
 
 - For one requirements file or package names on the command line: the `--extra-index-url` line, with pip's
-  dependency-confusion caveat, and for each wheel the `--hash=sha256:` to add to its line if the requirements pin
-  hashes.
+  dependency-confusion caveat, and for each package the `--hash=sha256:` options of its gap wheels (one per wheel,
+  so two for a package that fills two targets) to add to its existing line if the requirements pin hashes, keeping
+  the hashes already there. On a line of their own pip won't use them: it allows only the hashes all of a package's
+  lines share.
 - For one uv.lock: the `[[tool.uv.index]]` (with `explicit = true`) and `[tool.uv.sources]` entries for
   `pyproject.toml`, with a note for each package uv won't take from the index until it's listed as a direct
   dependency. Add them to an existing `[tool.uv.sources]` table rather than a second one, then run `uv lock`.

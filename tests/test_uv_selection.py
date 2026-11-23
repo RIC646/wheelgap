@@ -2184,11 +2184,14 @@ def test_script_lock_diff(tmp_path, capsys, fake_pypi):
     assert fake_pypi == []
 
 
-def test_script_lock_forks_apply_where_uv_installs_them(fixtures, capsys, fake_pypi):
+@pytest.mark.parametrize("name", ["forked.py.lock", "uv.lock"])
+def test_script_lock_forks_apply_where_uv_installs_them(fixtures, tmp_path, capsys, fake_pypi, name):
     # `uv lock --script forked.py` (uv 0.13.9) forks numpy per Python and packaging per platform. `uv export --script`
     # installs numpy 2.4.6 on < 3.12 and 2.5.5 on >= 3.12, packaging 26.4 on Linux and 23.2 elsewhere: each entry is
-    # n/a where uv takes the other, instead of a false `source` gap (#703).
-    lock = fixtures / "uvscript" / "forked.py.lock"
+    # n/a where uv takes the other, instead of a false `source` gap (#703). The same lock renamed to uv.lock is read
+    # the same way: uv picks a manifest requirement's fork by the package's resolution-markers in any lock.
+    lock = tmp_path / name
+    shutil.copyfile(fixtures / "uvscript" / "forked.py.lock", lock)
     assert main([str(lock), "-p", "3.11,3.15", "-t", "linux-x86_64,macos-arm64", "--json"]) == 0
     packages = json.loads(capsys.readouterr().out)["packages"]
     linux_11, mac_11, linux_15, mac_15 = (
@@ -2202,6 +2205,19 @@ def test_script_lock_forks_apply_where_uv_installs_them(fixtures, capsys, fake_p
         ("numpy", "2.5.5"): {linux_11: "n/a", mac_11: "n/a", linux_15: "wheel", mac_15: "wheel"},
         ("packaging", "23.2"): {linux_11: "n/a", mac_11: "wheel", linux_15: "n/a", mac_15: "wheel"},
         ("packaging", "26.4"): {linux_11: "wheel", mac_11: "n/a", linux_15: "wheel", mac_15: "n/a"},
+    }
+    assert fake_pypi == []
+
+
+def test_virtual_workspace_group_forks_apply_where_uv_installs_them(fixtures, capsys, fake_pypi):
+    # A virtual workspace root (`[tool.uv.workspace] members = []`, `[dependency-groups] dev = ["numpy>=1.26"]`, `uv
+    # lock --python 3.11` with uv 0.13.9) has only the manifest's group edges, which name numpy without a version.
+    # `uv sync --frozen` installs 2.4.6 on 3.11 and 2.5.5 on 3.12 and later, so neither is a gap on the other Python.
+    assert main([str(fixtures / "uvvirtualfork"), "-p", "3.11,3.13", "-t", "linux-x86_64", "--json"]) == 0
+    packages = json.loads(capsys.readouterr().out)["packages"]
+    assert {(p["name"], p["version"]): p["results"] for p in packages} == {
+        ("numpy", "2.4.6"): {"3.11 linux-x86_64": "wheel", "3.13 linux-x86_64": "n/a"},
+        ("numpy", "2.5.5"): {"3.11 linux-x86_64": "n/a", "3.13 linux-x86_64": "wheel"},
     }
     assert fake_pypi == []
 

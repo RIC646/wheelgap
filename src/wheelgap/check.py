@@ -758,17 +758,18 @@ def _narrow_candidates(
     return candidates
 
 
-def _uv_script_fork(source: Source, candidates: list[int], target: Target) -> list[int]:
-    """The entries of a script lock's manifest dependency that `uv sync --script` can install on `target`.
+def _uv_manifest_fork(source: Source, candidates: list[int], target: Target) -> list[int]:
+    """The entries of a uv.lock manifest dependency that `uv sync` can install on `target`.
 
-    A script's lock has no project package whose edges carry the fork (`version` and `marker`), so a manifest
-    requirement names only the package, and a package uv forked per Python or platform has an entry per fork. uv
-    takes the one entry whose own `resolution-markers` hold on the target, or that has none (find_by_markers in
-    https://github.com/astral-sh/uv/blob/0.13.9/crates/uv-lock/src/lock/mod.rs, commit 6b2d39dcc390, called for the
-    manifest's requirements and dependency groups in to_resolution_from_packages in crates/uv-lock/src/lock/
-    installable.rs). It evaluates them without extras; it writes them simplified against requires-python, which
-    doesn't change them on a target inside it. A marker the target can't decide counts as holding, and when no entry
-    fits (uv would fail: MissingRootPackage) every entry is kept, so a gap is never hidden."""
+    The `[manifest]` requirements (a script's dependencies) and dependency groups (a virtual workspace root's) name
+    only the package, not the `version` and `marker` a package's edges carry, so a package uv forked per Python or
+    platform matches an entry per fork. uv takes the one entry whose own `resolution-markers` hold on the target, or
+    that has none (find_by_markers in https://github.com/astral-sh/uv/blob/0.13.9/crates/uv-lock/src/lock/mod.rs,
+    commit 6b2d39dcc390, called for the manifest's requirements and dependency groups in to_resolution_from_packages
+    in crates/uv-lock/src/lock/installable.rs, which `uv sync` and `uv sync --script` always run with the manifest).
+    It evaluates them without extras; it writes them simplified against requires-python, which doesn't change them
+    on a target inside it. A marker the target can't decide counts as holding, and when no entry fits (uv would fail:
+    MissingRootPackage) every entry is kept, so a gap is never hidden."""
     if len(candidates) < 2:
         return candidates
     packages = source.uv_packages or []
@@ -967,8 +968,8 @@ def _uv_walk(
                 dependency.get("version"),
                 dependency.get("source"),
             )
-            if source.uv_script is not None and manifest in ("requirements", "group"):
-                candidates = _uv_script_fork(source, candidates, target)
+            if manifest in ("requirements", "group"):
+                candidates = _uv_manifest_fork(source, candidates, target)
             for i in candidates:
                 visit(i, parent, requested, [*path, source.packages[i].name])
 

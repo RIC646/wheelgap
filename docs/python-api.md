@@ -90,7 +90,9 @@ check_lockfile(
 Check every package a lockfile (or a project directory) installs on at least one target. Environment markers and the
 `uv.lock` dependency graph are respected, as on the command line. A `uv.lock` whose `requires-python` leaves out a
 target's Python may be missing wheels for it, so its PyPI packages are also looked up on the index (keeping the
-lock's files if a lookup fails).
+lock's files if a lookup fails). A `uv.lock` made with `[tool.uv] environments` covers those environments only, so
+ a target outside them raises `SourceError`, as on the [command line](inputs.md#uvlock). With no
+`targets`, the default platforms are narrowed to the ones it covers.
 
 - `deps=True` resolves the dependency tree for requirements files, a conda `environment.yml` (its `pip:` list),
   `pyproject.toml` and script (`# /// script`) inputs from
@@ -128,7 +130,10 @@ lock's files if a lookup fails).
 - `environment=` picks a `pixi.lock` environment (default: `default`); for a project directory it makes
   `pixi.lock` the lockfile read. Naming one for any other lockfile raises `SourceError`.
 
-Without `deps=True`, `check_lockfile()` doesn't read `pyproject.toml` or a script as an input.
+Without `deps=True`, `check_lockfile()` doesn't read `pyproject.toml` or a script as an input. For a project
+directory it reads the lockfile it finds by name at the root, and nothing else: the command line's wider search
+([Which file is read](inputs.md#which-file-is-read)) comes with a note that says which file was picked, which a
+function's return value has no place for, so pass the file you mean.
 
 ### Pyodide
 
@@ -157,7 +162,7 @@ Each check returns a `Result` (a list of them for `check_packages()`, `check_loc
 | `gaps` | the targets with a gap (`source`, `missing` or `unknown`) |
 | `bundled_versions`, `bundled_version`, `bundled_version_differs` | with `pyodide_locks`: see [Pyodide](#pyodide) |
 | `issues_url` | the package's issue tracker URL from PyPI metadata, or `None` when absent or not on PyPI |
-| `pip_refuses` | for a `uv.lock` checked with `online=True`: the files uv installs and pip would refuse, each mapped to the reason (`"requires Python <3.15,>=3.10"`); empty otherwise. uv ignores `Requires-Python` upper bounds, and `statuses` follow uv. `to_dict()` includes `"pip_refuses"` when it isn't empty |
+| `pip_refuses` | for a `uv.lock` checked with `online=True`: the files uv installs and pip would refuse, each mapped to the reason (`"requires Python <3.15,>=3.10"`); empty otherwise. uv checks the `Requires-Python` lower bound, and `statuses` follow uv. `to_dict()` includes `"pip_refuses"` when it isn't empty |
 | `to_dict()` | the package in the shape of a `--json` package entry, keyed by each target's full label (`"3.13 musl-aarch64"`, with the Python even when only one is checked) |
 
 ### Explaining a gap

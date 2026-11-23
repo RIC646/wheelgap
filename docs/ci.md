@@ -135,6 +135,38 @@ the requirement that pulls it in when exactly one does on every target where it 
 isn't certain, the annotation names the file without a line and the message names them all. See
 [GitHub annotations](cli.md#github-annotations) for the full rules.
 
+With [`--fix`](cli.md#fix) in `args`, the annotation of a package that a newer official release
+fixes names that release first, and the annotation of a package that a gap wheel fills gets one more sentence, naming
+the targets it fills (as the fallback, "If you can't upgrade", when there's an upgrade too); see [below](#fix).
+
+With `--dockerfile-inputs`, each annotation ends with `(installed by Dockerfile:4)`. When the package
+is in a file included with `-r` (at any depth), it also names the file on the `RUN` line it comes through, relative to
+the build context: `(installed by Dockerfile:4, through requirements.txt)`, or `through constraints.txt` for a `-r`
+inside the line's `-c` file.
+
+### Fixing a gap with a gap wheel {#fix}
+
+Put [`--fix`](cli.md#fix) in `args` to see which gaps a wheel on wheelgap's
+[gap wheel index](https://wheelgap.github.io/wheels/) fills:
+
+```yaml
+- uses: actions/checkout@v7
+- uses: wheelgap/wheelgap@v0.14.0
+  with:
+    args: uv.lock -p 3.14 -t win-arm64 --fix
+```
+
+The gap wheel section, with how to install from the index, goes in the log and the job summary, and the fix goes in
+the annotation on the package's line: `cryptography 46.0.3 builds from source on win-arm64. A gap wheel on wheelgap's
+gap wheel index fills win-arm64 (unofficial, built by wheelgap from the PyPI sdist); see the gap wheel section of the
+log for how to use it.` For a requirements file, the annotation gives the `pip install --extra-index-url` command
+instead. Gap wheels are unofficial: built by wheelgap from the PyPI sdist, not by the package's maintainers. The
+check's result doesn't change: the annotation's level and the step's exit code are the same with and without `--fix`.
+
+The list of gap wheels is read from wheelgap.github.io in one request that names no package. With `--index-url` or a
+`WHEELGAP_INDEX_URL` mirror, `--fix` is off and reads nothing. See
+[the recipes](recipes.md#installing-from-the-gap-wheel-index) for how to install from the index.
+
 ### Watching a platform
 
 To watch a platform before you support it, put `--advisory` in `args`:

@@ -616,7 +616,9 @@ empty `FILE` is an error, as for `--junit`.
    what the nearest one drops; or `--no-binary`), the package's issue tracker where no newer release has a wheel, and,
    on a free-threaded target whose release has only abi3 wheels, a line saying so. For a uv.lock, when what the newer
    releases drop is only an older Python's wheel because their `Requires-Python` leaves that Python out, uv may lock a
-   release per Python: such a gap goes under "Maybe, with uv:", with `uv lock --upgrade-package NAME` to try.
+   release per Python: such a gap goes under "Maybe, with uv:", with `uv lock --upgrade-package NAME` to try (and the
+   folder to run it in), or `uv lock --script SCRIPT --upgrade-package NAME` for a script's lock; not when your own
+   requirement leaves that release out, which the "No fix yet" line then names.
 
 A summary at the top counts them (`--fix: 6 gaps (3 packages × their targets): 4 can be fixed by upgrading to an
 official release; 2 only by an unofficial gap wheel; 0 have no fix yet.`); only upgrades count as fixed, and gaps

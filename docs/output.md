@@ -417,7 +417,9 @@ each target's release. In Markdown, the what-to-run line and the note that wheel
 their own. A gap with neither goes under `No fix yet:`, one line per package with the reason per target (for a release
 that drops a wheel elsewhere, what the nearest newer one has none for) and, where no newer release has a wheel,
 `ask for a wheel: URL` when wheelgap knows the package's issue tracker; a uv.lock's gap that uv may fix by locking a
-release per Python goes under `Maybe, with uv:` instead, with `uv lock --upgrade-package NAME` to try; on a
+release per Python goes under `Maybe, with uv:` instead, with `uv lock --upgrade-package NAME` to try (`uv lock
+--script SCRIPT --upgrade-package NAME` for a script's lock), unless your own requirement leaves that release out
+(`(pyproject.toml's numpy<2.5 leaves out 2.5.2)` on the `No fix yet:` line); on a
 free-threaded target whose release has only abi3 wheels, the line says so (`only abi3 wheels for linux-x86_64, which
 free-threaded Python can't use: ask NAME for a cp315t wheel at URL`). Packages whose releases weren't looked up get one
 line saying why: wheelgap can't tell they come from PyPI (their names stay private), the run uses another index, or the

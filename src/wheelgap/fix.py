@@ -56,6 +56,8 @@ class Cell:
     abi3_only: bool = False  # NONE, on a free-threaded target: the release has abi3 wheels for its platform only
     # LOSES and UV_MAY_FORK: the nearest newer release with a wheel for the target, and the targets it has none for
     drops: tuple[str, tuple[Target, ...]] | None = None
+    # LOSES: the project's own requirement that leaves that release out, where it would otherwise be UV_MAY_FORK
+    blocked: Constraint | None = None
 
 
 @dataclass(frozen=True)
@@ -113,7 +115,14 @@ def plan(
                 # The release leaves the lost wheels' older Pythons out by Requires-Python: uv may lock the old release
                 # there and the new one here (a fork per Python). pip can't, so only for a uv.lock.
                 forks = source.kind == "uv" and t in found.python_drops
-                cells.append(Cell(r, t, source, NONE, reason=UV_MAY_FORK if forks else LOSES, drops=drops))
+                blocked = None
+                if forks and drops is not None:
+                    # Not when the project's own requirement (as wheelgap reads it) leaves that release out: then
+                    # uv lock --upgrade-package can't reach it, fork or not.
+                    own = constraint(Cell(r, t, source, UPGRADE, version=drops[0]))
+                    forks, blocked = own is None or own.allows, own if own is not None and not own.allows else None
+                reason = UV_MAY_FORK if forks else LOSES
+                cells.append(Cell(r, t, source, NONE, reason=reason, drops=drops, blocked=blocked))
                 continue
             else:
                 reason = NO_NEWER
@@ -311,7 +320,11 @@ def how(source: Source, cells: list[Cell], code: Callable[[str], str] = _plain) 
 
 def _what(cells: list[Cell]) -> str:
     """ "pins", or "requirements" when a line is a range or a bare name (the index picked the version)."""
-    ranged = any(c.row.package.spec or c.row.package.version_from_index for c in cells)
+    # A -c constraint pins it, so the line itself may be a bare name.
+    ranged = any(
+        c.row.package.spec or c.row.package.version_from_index or c.row.package.key in c.source.constraint_specs
+        for c in cells
+    )
     return "requirements" if ranged else "pins"
 
 
@@ -356,6 +369,9 @@ def _reason(reason: str, cs: list[Cell], multi_py: bool) -> str:
             f"{version} has none for {', '.join(dict.fromkeys(t.label(multi_py) for t in ts))}" for version, ts in drops
         )
         text += f" ({lost})"
+    for c in dict.fromkeys(c.blocked for c in cs if c.blocked):  # what would have let uv fork it
+        if c is not None and drops:
+            text += f" ({c.file}'s {', '.join(c.requirements)} leaves out {drops[0][0]})"
     return text
 
 
@@ -372,11 +388,16 @@ def _none_line(name: str, pinned: str, cs: list[Cell], multi_py: bool, ask: str 
             f"ask {code(name)} for a {tags} wheel"
         )
         return line + (f" at {ask}" if ask else "")
-    if any(c.reason == UV_MAY_FORK for c in cs):
-        line += (
-            f"; uv may fork {code(name)} per Python: try {code(f'uv lock --upgrade-package {name}')} and run "
-            "wheelgap again"
-        )
+    if forked := [c for c in cs if c.reason == UV_MAY_FORK]:
+        source = forked[0].source
+        if source.uv_script is not None:  # the script's own lock: uv lock without --script relocks a project
+            command = f"uv lock --script {source.uv_script} --upgrade-package {name}"
+            where = ""
+        else:
+            command = f"uv lock --upgrade-package {name}"
+            folder = str(source.uv_pyproject.parent) if source.uv_pyproject is not None else "."
+            where = " in the project folder" if folder == "." else f" in {code(folder)}"
+        line += f"; uv may fork {code(name)} per Python: try {code(command)}{where} and run wheelgap again"
     # Asking upstream helps only where no release has the wheel, not for a wheel dropped elsewhere or --no-binary.
     return line + (f"; ask for a wheel: {ask}" if ask and any(c.reason == NO_NEWER for c in cs) else "")
 

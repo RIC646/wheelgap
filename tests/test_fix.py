@@ -1584,6 +1584,7 @@ def test_fix_says_a_constraints_file_pin_holds_the_upgrade_back(capsys, fake_pyp
     (tmp_path / "requirements.txt").write_text("-c c.txt\nfixme\n", encoding="utf-8")
     _, out, _ = run(capsys, str(tmp_path / "requirements.txt"), "-p", "3.14t", "-t", "win-arm64", "--fix")
     assert "  fixme 1.0 -> 1.3: win-arm64 (needs fixme==1.0 in the -c constraints of requirements.txt relaxed)\n" in out
+    assert "In requirements.txt, change the requirements to fixme==1.3.\n" in out  # its line is a bare name
 
 
 def test_fix_counts_packages_not_looked_up_apart_in_json(capsys, fake_pypi, gap_wheels, tmp_path):
@@ -1620,8 +1621,8 @@ def test_fix_says_uv_may_fork_where_only_another_pythons_wheel_is_lost(capsys, f
     assert (
         "Maybe, with uv:\n"
         "  pyfork 1.0: every newer release with a wheel drops one it has on another Python for 3.14 linux-x86_64 (2.0 "
-        "has none for 3.13 linux-x86_64); uv may fork pyfork per Python: try uv lock --upgrade-package pyfork and run "
-        "wheelgap again\n"
+        "has none for 3.13 linux-x86_64); uv may fork pyfork per Python: try uv lock --upgrade-package pyfork in "
+        f"{tmp_path} and run wheelgap again\n"
     ) in out
     assert "No fix yet" not in out and "; 1 may be fixed by an upgrade uv locks per Python." in out
     _, data, _ = gap_wheels_json(capsys, str(tmp_path / "uv.lock"), *args)
@@ -1668,3 +1669,31 @@ def test_fix_says_no_uv_fork_when_the_newer_release_still_admits_the_older_pytho
     _, out, _ = run(capsys, str(tmp_path / "uv.lock"), "-p", "3.13,3.14", "-t", "linux-x86_64", "--fix")
     assert "uv may fork" not in out
     assert "No fix yet:\n  pyfork 1.0: every newer release with a wheel drops one it has elsewhere for 3.14" in out
+
+
+def test_fix_uv_may_fork_only_where_the_project_allows_the_release(capsys, fake_pypi, gap_wheels, tmp_path):
+    lock = pyfork_uv_lock().replace(
+        'dependencies = [{ name = "pyfork" }]\n',
+        'dependencies = [{ name = "pyfork" }]\n\n[package.metadata]\n'
+        'requires-dist = [{ name = "pyfork", specifier = "<2" }]\n',
+    )
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    _, out, _ = run(capsys, str(tmp_path / "uv.lock"), "-p", "3.13,3.14", "-t", "linux-x86_64", "--fix")
+    assert "uv may fork" not in out
+    assert (
+        "No fix yet:\n  pyfork 1.0: every newer release with a wheel drops one it has elsewhere for 3.14 linux-x86_64 "
+        "(2.0 has none for 3.13 linux-x86_64) (pyproject.toml's pyfork<2 leaves out 2.0)\n"
+    ) in out
+
+
+def test_fix_uv_may_fork_names_the_script_for_a_script_lock(capsys, fake_pypi, gap_wheels, tmp_path):
+    (tmp_path / "tool.py.lock").write_text(
+        pyfork_uv_lock().replace(
+            '[[package]]\nname = "app"\nversion = "0"\nsource = { editable = "." }\n'
+            'dependencies = [{ name = "pyfork" }]\n\n',
+            '[manifest]\nrequirements = [{ name = "pyfork" }]\n\n',
+        ),
+        encoding="utf-8",
+    )
+    _, out, _ = run(capsys, str(tmp_path / "tool.py.lock"), "-p", "3.13,3.14", "-t", "linux-x86_64", "--fix")
+    assert f"try uv lock --script {tmp_path / 'tool.py'} --upgrade-package pyfork and run wheelgap again" in out

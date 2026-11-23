@@ -247,7 +247,7 @@
         },
         "fix_summary": {
             "type": "object",
-            "description": "Present only with --fix (after 0.13.0): how many gap cells (a package on a target, source or missing, not ignored) each kind of packages[].fix covers. gaps is the sum of the other three; only upgrade counts as fixed by an official release (gap wheels are unofficial). It doesn't change summary or the exit code.",
+            "description": "Present only with --fix (after 0.13.0): how many gap cells (a package on a target, source or missing, not ignored) each kind of packages[].fix covers. gaps is the sum of the other five; only upgrade counts as fixed by an official release (gap wheels are unofficial). It doesn't change summary or the exit code.",
             "additionalProperties": false,
             "required": ["gaps", "upgrade", "gap_wheel", "none", "not_looked_up", "uv_may_fork"],
             "properties": {

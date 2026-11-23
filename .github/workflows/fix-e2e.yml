@@ -9,8 +9,9 @@ name: Fix end-to-end
 # - linux: python:3.15-slim (Debian trixie, glibc 2.41: orjson comes from PyPI, so --fix must not name it) and
 #   python:3.15-slim-bookworm (glibc 2.36: --fix must name orjson too). A plain pip install must fail building
 #   from source, then the --fix lines must install our wheels and the packages must work.
-# - linux-hashes: the same from a hash-pinned file made by `uv pip compile --generate-hashes`, applying the hash
-#   lines --fix prints both as printed (one line each) and added to each package's existing line.
+# - linux-hashes: the same from a hash-pinned file made by `uv pip compile --generate-hashes`, adding the hashes
+#   --fix prints (one line per package) to each package's existing line, as its output says, then
+#   pip install --require-hashes.
 # - windows: GitHub's Windows runners have MSVC (and gcc, clang and cargo on PATH), so a plain install there can build
 #   from source. It shows instead that PyPI has no wheel (pip install --only-binary=:all: fails), and that the --fix
 #   install takes our wheels, from pip's --report, rather than building.
@@ -64,25 +65,19 @@ jobs:
         run: python scripts/fix_e2e.py plain -t linux-x86_64 --expect "$EXPECT" --pypi-only build
 
   linux-hashes:
-    name: linux, hash-pinned (${{ matrix.apply }})
+    name: linux, hash-pinned
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container: python:3.15-slim
-    strategy:
-      fail-fast: false
-      matrix:
-        apply: [printed-lines, merged]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Hashes for both targets, as for a requirements file shared by Linux and Windows: --fix prints a hash line
-      # per package and target.
+      # Hashes for both targets, as for a requirements file shared by Linux and Windows: --fix gives each package a
+      # hash per target it fills.
       - name: Without and with --fix, --require-hashes
         shell: bash
-        env:
-          APPLY: ${{ matrix.apply }}
-        run: python scripts/fix_e2e.py hashed -t linux-x86_64,win-amd64 --expect lz4,zstandard --apply "$APPLY"
+        run: python scripts/fix_e2e.py hashed -t linux-x86_64,win-amd64 --expect lz4,zstandard
 
   windows:
     runs-on: windows-latest

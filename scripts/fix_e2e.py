@@ -2,7 +2,7 @@
 
     python scripts/fix_e2e.py plain -t linux-x86_64 --expect lz4,zstandard --pypi-only build
     python scripts/fix_e2e.py plain -t win-amd64 --expect lz4,zstandard --pypi-only only-binary
-    python scripts/fix_e2e.py hashed -t linux-x86_64,win-amd64 --expect lz4,zstandard --apply printed-lines
+    python scripts/fix_e2e.py hashed -t linux-x86_64,win-amd64 --expect lz4,zstandard
 
 It runs on the Python under test and uses only the standard library, so it needs nothing but that Python and the
 network. Every install goes into a fresh venv; wheelgap is installed from this checkout into a venv of its own.
@@ -20,11 +20,12 @@ network. Every install goes into a fresh venv; wheelgap is installed from this c
 4. imports orjson, zstandard and lz4 and round-trips data through each.
 
 `hashed` does the same from a fully hash-pinned file made by `uv pip compile --generate-hashes`, with --fix run for
-every `-t` target (a cross-platform file gets one hash line per target a gap wheel fills), then applies the hash lines
---fix prints under "If the requirements pin hashes, also add each wheel's hash to its line:":
-- `--apply printed-lines` appends them to the file as printed, one requirement line each;
-- `--apply merged` adds each `--hash` to the package's existing requirement line, as the snippet's comments say.
-Either way `pip install --require-hashes -r` must succeed and take the gap wheels.
+every `-t` target (a cross-platform file needs a gap wheel's hash for each target it fills). --fix prints one line per
+package with all its gap wheels' `--hash` options, under "If the requirements pin hashes, add these hashes to each
+package's existing line, keeping the ones it has ...", and --print-gap-wheel-snippet says the same in a comment per
+package; the two must agree. The script adds each of those `--hash` options to the package's existing requirement
+line, keeping PyPI's hashes, as both say, and `pip install --require-hashes -r` must succeed and take the gap wheels.
+(Not as a line of their own: pip allows only the hashes all of a package's lines share, so it would build the sdist.)
 
 Exit code 0 when every check passes, 1 when one fails (with a ::error:: annotation saying which), and each step's
 evidence goes to the job summary when GITHUB_STEP_SUMMARY is set.
@@ -52,7 +53,15 @@ UV = "uv==0.13.9"  # only to make the hash-pinned file, the way a project would
 COMPILERS = ["cc", "gcc", "c++", "g++", "clang", "cargo", "rustc"]
 FILLS_HEADER = "wheelgap's gap wheel index has wheels PyPI lacks for:"
 ADD_LINE_HEADER = "To install them with pip, add this line to your requirements file:"
-HASHES_HEADER = "If the requirements pin hashes, also add each wheel's hash to its line:"
+HASHES_HEADER = (
+    "If the requirements pin hashes, add these hashes to each package's existing line, keeping the ones it has "
+    "(on a second line for the same package, pip won't use them):"
+)
+# --print-gap-wheel-snippet's comment for one package of a hash-pinned file: its options, then its NAME==VERSION.
+SNIPPET_HASHES = re.compile(
+    r"# If the requirements pin hashes, add ((?:--hash=sha256:[0-9a-f]{64} ?)+) to the existing (\S+) line, keeping "
+    r"the hashes it has \(not as a line of its own, which pip won't use\)\."
+)
 ROUND_TRIP = """
 import lz4.frame, orjson, zstandard
 from importlib.metadata import version
@@ -252,18 +261,32 @@ def plain(args: argparse.Namespace, work: Path) -> None:
     install_and_use(work, reqs, args.expect, require_hashes=False)
 
 
-def merge_hashes(text: str, printed: list[str]) -> str:
-    """Add each printed `NAME==VERSION --hash=sha256:H` to that requirement's own (multi-line) entry."""
+def merge_hashes(text: str, printed: dict[str, list[str]]) -> str:
+    """Add each package's printed `--hash=sha256:H` options to its existing (multi-line) entry, keeping its own."""
     lines = text.splitlines()
-    for ln in printed:
-        req, opt = ln.split(" ", 1)
+    for req, opts in printed.items():
         starts = [i for i, x in enumerate(lines) if x.split(" ", 1)[0] == req]
         if len(starts) != 1:
             raise CheckFailed(f"{req} is on {len(starts)} lines of the compiled file, expected 1")
-        line = lines[starts[0]]
-        lines[starts[0]] = line if line.endswith("\\") else line + " \\"
-        lines.insert(starts[0] + 1, f"    {opt}" + (" \\" if line.endswith("\\") else ""))
+        for opt in opts:
+            line = lines[starts[0]]
+            lines[starts[0]] = line if line.endswith("\\") else line + " \\"
+            lines.insert(starts[0] + 1, f"    {opt}" + (" \\" if line.endswith("\\") else ""))
     return "\n".join(lines) + "\n"
+
+
+def hash_lines(out: str, expect: set[str], targets: list[str]) -> dict[str, list[str]]:
+    """{NAME==VERSION: its --hash options} from --fix's text output: one line per package, a hash per target."""
+    printed: dict[str, list[str]] = {}
+    for ln in section(out, HASHES_HEADER):
+        req, *opts = ln.split()
+        if req in printed or not opts or not all(re.fullmatch(r"--hash=sha256:[0-9a-f]{64}", o) for o in opts):
+            raise CheckFailed(f"unexpected line under the hashes header: {ln!r}")
+        printed[req] = opts
+    names = {req.split("==", 1)[0] for req in printed}
+    if names != expect or any(len(opts) != len(targets) for opts in printed.values()):
+        raise CheckFailed(f"expected one line per package of {sorted(expect)}, a hash per target, got {printed}")
+    return printed
 
 
 def hashed(args: argparse.Namespace, work: Path) -> None:
@@ -282,20 +305,18 @@ def hashed(args: argparse.Namespace, work: Path) -> None:
     wheelgap = install_wheelgap(work)
     out = run_fix(wheelgap, reqs, args.target)
     check_fills(out, args.expect, args.target)
-    add, printed = section(out, ADD_LINE_HEADER), section(out, HASHES_HEADER)
-    per_pkg = {name: sum(ln.startswith(name + "==") for ln in printed) for name in args.expect}
-    if any(n != len(args.target) for n in per_pkg.values()) or len(printed) != len(args.expect) * len(args.target):
-        raise CheckFailed(f"expected one hash line per package and target, got {printed}")
-    text = reqs.read_text(encoding="utf-8")
-    if args.apply == "printed-lines":
-        text = text + "\n".join([*add, *printed]) + "\n"
-    else:
-        text = "\n".join(add) + "\n" + merge_hashes(text, printed)
+    add, printed = section(out, ADD_LINE_HEADER), hash_lines(out, args.expect, args.target)
+    snippet = run_fix(wheelgap, reqs, args.target, ["--print-gap-wheel-snippet"])
+    in_snippet = {m[2]: m[1].split() for m in map(SNIPPET_HASHES.fullmatch, snippet.splitlines()) if m}
+    if in_snippet != printed:
+        raise CheckFailed(f"the snippet's hash comments {in_snippet} differ from --fix's hash lines {printed}")
+    text = "\n".join(add) + "\n" + merge_hashes(reqs.read_text(encoding="utf-8"), printed)
     reqs.write_text(text, encoding="utf-8")
-    ours = [p.split(" ", 1)[1] for p in printed]
+    ours = [h for opts in printed.values() for h in opts]
     shown = [ln for ln in text.splitlines() if not ln.startswith("    --hash=") or any(h in ln for h in ours)]
     summary_block(
-        f"requirements.txt with --fix's lines ({args.apply}; PyPI's own hashes left out here)", "\n".join(shown)
+        "requirements.txt with --fix's hashes on each package's line (PyPI's own hashes left out here)",
+        "\n".join(shown),
     )
     install_and_use(work, reqs, args.expect, require_hashes=True)
 
@@ -309,8 +330,6 @@ def main() -> int:
         p.add_argument("--expect", required=True, type=lambda s: set(s.split(",")), help="packages --fix must name")
         if name == "plain":
             p.add_argument("--pypi-only", choices=["build", "only-binary"], required=True)
-        else:
-            p.add_argument("--apply", choices=["printed-lines", "merged"], required=True)
     args = parser.parse_args()
     summary(f"### `{args.mode}` on Python {platform.python_version()}, {platform.platform()}", "")
     work = Path(tempfile.mkdtemp(prefix="fix-e2e-"))

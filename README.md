@@ -11,9 +11,27 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 [![good first issues](https://img.shields.io/github/issues/wheelgap/wheelgap/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/wheelgap/wheelgap/labels/good%20first%20issue)
 
-**Find the Python dependencies that have no prebuilt wheel for your target platform, before your Docker build does.**
+**Find the Python dependencies that have no prebuilt wheel for your platform, before your Docker build does, and fill the gap with a verified wheel.**
 
-Point it at your lockfile and the platforms you ship to (ARM servers, Alpine images, Windows on ARM, free-threaded Python 3.14t). It tells you which packages pip or uv will have to compile from source, and which can't be installed at all.
+Point it at your lockfile and the platforms you ship to (ARM servers, Alpine images, Windows on ARM, Python 3.15, free-threaded 3.14t). It tells you which packages pip or uv will have to compile from source, and which can't be installed at all. With `--fix` it also says which of those gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, and prints the line that installs it:
+
+```console
+$ uvx wheelgap requirements.txt -p 3.15 -t linux-x86_64,win-amd64 --fix
+package    version  linux-x86_64  win-amd64
+lz4        4.4.5    ● source      ● source
+orjson     3.13.0   ● source      ✓
+zstandard  0.25.0   ● source      ● source
+...
+wheelgap's gap wheel index has wheels PyPI lacks for:
+  lz4 4.4.5: linux-x86_64, win-amd64
+  orjson 3.13.0: linux-x86_64
+  zstandard 0.25.0: linux-x86_64, win-amd64
+
+To install them with pip, add this line to your requirements file:
+  --extra-index-url https://wheelgap.github.io/wheels/simple/
+```
+
+Each gap wheel is built twice from the sdist on PyPI, published only if both builds are byte-for-byte identical, and installed and imported on a fresh machine first ([how they're made](https://wheelgap.github.io/wheels/)). PyPI stays your main index; pip only takes a wheel from ours where PyPI has none for your machine.
 
 🔎 **Try it on any public repo, in your browser: [wheelgap.github.io/tracker/check](https://wheelgap.github.io/tracker/check/).** Paste a GitHub repository. It reads the lockfile, works out the platforms the repo ships to from its CI and Dockerfiles, and lists every dependency with no prebuilt wheel there, with the release that fixes it. Nothing to install.
 
@@ -134,7 +152,7 @@ resolutions appear in separate rows, including in JSON, with `n/a` for targets u
 
 `--explain` can also show the coverage tracker's notes (`--notes`), what a source build needs (`--build-info`), conda-forge builds that fit (`--conda-forge`), piwheels wheels for a Raspberry Pi gap (`--piwheels`) and the nearest newer release with wheels for a gap (`--suggest`). These are opt-in, since they send package names elsewhere ([which names](https://wheelgap.github.io/wheelgap/how-it-works/#pypi-origin)). `--suggest` is on by default when `--deps` resolved every input, since it already looked the whole tree up on PyPI; `--no-suggest` turns it off.
 
-`--fix` lists the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills (today Windows on ARM, musl Linux on ARM and free-threaded x86_64 Linux, for CPython 3.14 and 3.14t), with the `pyproject.toml` snippet for uv or the `--extra-index-url` line for pip. It reads the index's list in one request that names no package, and never changes the exit code ([how](https://wheelgap.github.io/wheelgap/recipes/#installing-from-the-gap-wheel-index)); `--print-gap-wheel-snippet` prints just that configuration for one uv.lock or requirements file, without writing it ([details](https://wheelgap.github.io/wheelgap/cli/#print-gap-wheel-snippet)).
+`--fix` lists the gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills (today Python 3.15 on Linux x86_64 and Windows x64, Python 3.14 and 3.14t on Windows on ARM, 3.14t on Linux x86_64 and 3.14 on Alpine Linux on ARM; [the list](https://wheelgap.github.io/wheels/#published_wheels)), with the `pyproject.toml` snippet for uv or the `--extra-index-url` line for pip. It reads the index's list in one request that names no package, and never changes the exit code ([how](https://wheelgap.github.io/wheelgap/recipes/#installing-from-the-gap-wheel-index)); `--print-gap-wheel-snippet` prints just that configuration for one uv.lock or requirements file, without writing it ([details](https://wheelgap.github.io/wheelgap/cli/#print-gap-wheel-snippet)).
 
 The docs cover [inputs and dependency selection](https://wheelgap.github.io/wheelgap/inputs/), [`--explain`](https://wheelgap.github.io/wheelgap/output/#explain), [the `--json` schema](https://wheelgap.github.io/wheelgap/output/#json), [every flag](https://wheelgap.github.io/wheelgap/cli/) and the [recipes](https://wheelgap.github.io/wheelgap/recipes/) for multi-arch images, monorepos and free-threading readiness.
 

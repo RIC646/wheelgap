@@ -17,6 +17,8 @@ Point it at your lockfile and the platforms you ship to (ARM servers, Alpine ima
 
 ```console
 $ uvx wheelgap requirements.txt -p 3.15 -t linux-x86_64,win-amd64 --fix
+wheelgap 0.14.0 · requirements.txt · 3 packages · Python 3.15
+
 package     version  linux-x86_64  win-amd64
 markupsafe  3.0.2    ● source      ● source
 pyyaml      6.0.3    ● source      ● source
@@ -28,13 +30,15 @@ Upgrade: a newer official release has the wheel:
   markupsafe 3.0.2 -> 3.0.4: linux-x86_64, win-amd64
   pyyaml 6.0.3 -> 6.0.4: linux-x86_64, win-amd64
 In requirements.txt, change the pins to markupsafe==3.0.4, pyyaml==6.0.4.
+wheelgap doesn't resolve dependencies: the rest of them must allow these releases.
 
 As a fallback, wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the packages' maintainers) for:
+  pyyaml 6.0.3: linux-x86_64 (if you can't upgrade pyyaml)
   zstandard 0.25.0: linux-x86_64, win-amd64
 ...
 ```
 
-In 83 pinned projects from the 300 most-starred Python repositories, 82% of the Python 3.15 gaps were stale pins like these: the release with the wheel was already out. For a `uv.lock`, `--fix` prints the `uv lock --upgrade-package` command instead. Gap wheels are built twice from the sdist on PyPI, published only if both builds are byte-for-byte identical, and installed and imported on a fresh machine first ([how they're made](https://wheelgap.github.io/wheels/)).
+In 83 pinned projects from the 300 most-starred Python repositories, 82% of the Python 3.15 gaps on Linux x86-64 were stale pins like these: the release with the wheel was already out. For a `uv.lock`, `--fix` prints the `uv lock --upgrade-package` command instead. Gap wheels are built twice from the sdist on PyPI, published only if both builds are byte-for-byte identical, and installed and imported on a fresh machine first ([how they're made](https://wheelgap.github.io/wheels/)).
 
 🔎 **Try it on any public repo, in your browser: [wheelgap.github.io/tracker/check](https://wheelgap.github.io/tracker/check/).** Paste a GitHub repository. It reads the lockfile, works out the platforms the repo ships to from its CI and Dockerfiles, and lists every dependency with no prebuilt wheel there, with the release that fixes it. Nothing to install.
 

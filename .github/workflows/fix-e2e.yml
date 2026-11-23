@@ -11,7 +11,8 @@ name: Fix end-to-end
 #   from source, then the --fix lines must install our wheels and the packages must work.
 # - linux-hashes: the same from a hash-pinned file made by `uv pip compile --generate-hashes`, applying the hash
 #   lines --fix prints both as printed (one line each) and added to each package's existing line.
-# - windows: GitHub's Windows runners have MSVC, so a plain install there builds from source and succeeds. It shows
+# - windows: GitHub's Windows runners have MSVC (and gcc, clang and cargo on PATH), so a plain install there can build
+#   from source. It shows
 #   instead that PyPI has no wheel (pip install --only-binary=:all: fails), and that the --fix install takes our
 #   wheels, from pip's --report, rather than building.
 #

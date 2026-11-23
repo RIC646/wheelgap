@@ -144,9 +144,12 @@ def pypi_only(work: Path, reqs: Path, mode: str) -> None:
     py = venv(work / "pypi-only-venv")
     if mode == "build":
         code, out = run([py, "-m", "pip", "install", "-r", reqs], title="PyPI alone: pip install -r requirements.txt")
-        # pip reports a failed sdist build like this, naming the packages; the compiler's own error says why.
-        why = [ln for ln in out.splitlines() if re.search(r"Failed to build|Failed building wheel|error: command", ln)]
-        expected = code != 0 and any(re.search(r"Failed to build|Failed building wheel", ln) for ln in why)
+        # pip names the sdist it failed to build, and the build's own error must be the missing compiler (zstandard's
+        # setup.py runs gcc to preprocess a header; a setuptools compile says "error: command 'gcc' failed").
+        failed = r"Failed to build|Failed building wheel"
+        no_cc = r"No such file or directory: '(cc|gcc|c\+\+|g\+\+|cargo|rustc)'|error: command '[^']*' failed"
+        why = [ln.strip() for ln in out.splitlines() if re.search(f"{failed}|{no_cc}", ln)]
+        expected = code != 0 and any(re.search(failed, ln) for ln in why) and any(re.search(no_cc, ln) for ln in why)
     else:
         cmd: list[str | Path] = [py, "-m", "pip", "install", "--only-binary=:all:", "-r", reqs]
         code, out = run(cmd, title="PyPI alone, wheels only: pip install --only-binary=:all: -r requirements.txt")

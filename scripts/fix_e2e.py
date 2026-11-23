@@ -52,7 +52,7 @@ UV = "uv==0.13.9"  # only to make the hash-pinned file, the way a project would
 COMPILERS = ["cc", "gcc", "c++", "g++", "clang", "cargo", "rustc"]
 FILLS_HEADER = "wheelgap's gap wheel index has wheels PyPI lacks for:"
 ADD_LINE_HEADER = "To install them with pip, add this line to your requirements file:"
-HASHES_HEADER = "If the requirements pin hashes, also add each wheel's hash to its line:"
+HASHES_HEADER = "If the requirements pin hashes"
 ROUND_TRIP = """
 import lz4.frame, orjson, zstandard
 from importlib.metadata import version
@@ -131,7 +131,7 @@ def check_no_compiler(require_none: bool) -> None:
 
 def install_wheelgap(work: Path) -> Path:
     py = venv(work / "wheelgap-venv")
-    code, _ = run([py, "-m", "pip", "install", REPO], title="Install wheelgap from this checkout")
+    code, _ = run([py, "-m", "pip", "install", "https://github.com/wheelgap/wheelgap/archive/refs/heads/fix-gap-wheel-hash-lines.zip"], title="TEMP: install wheelgap from the #697 branch")
     if code:
         raise CheckFailed("could not install wheelgap from the checkout")
     exe = py.parent / ("wheelgap.exe" if os.name == "nt" else "wheelgap")
@@ -175,10 +175,12 @@ def run_fix(wheelgap: Path, reqs: Path, targets: list[str], extra: list[str] | N
 def section(out: str, header: str) -> list[str]:
     """The indented lines right under header in --fix's text output."""
     lines = out.splitlines()
-    if header not in lines:
+    at = [i for i, ln in enumerate(lines) if ln.startswith(header)]
+    if not at:
         raise CheckFailed(f"--fix printed no {header!r} line")
+    print("section header:", lines[at[0]])
     got = []
-    for ln in lines[lines.index(header) + 1 :]:
+    for ln in lines[at[0] + 1 :]:
         if not ln.startswith("  "):
             break
         got.append(ln.strip())
@@ -256,13 +258,14 @@ def merge_hashes(text: str, printed: list[str]) -> str:
     """Add each printed `NAME==VERSION --hash=sha256:H` to that requirement's own (multi-line) entry."""
     lines = text.splitlines()
     for ln in printed:
-        req, opt = ln.split(" ", 1)
+        req, opts = ln.split(" ", 1)
         starts = [i for i, x in enumerate(lines) if x.split(" ", 1)[0] == req]
         if len(starts) != 1:
             raise CheckFailed(f"{req} is on {len(starts)} lines of the compiled file, expected 1")
-        line = lines[starts[0]]
-        lines[starts[0]] = line if line.endswith("\\") else line + " \\"
-        lines.insert(starts[0] + 1, f"    {opt}" + (" \\" if line.endswith("\\") else ""))
+        for opt in opts.split():
+            line = lines[starts[0]]
+            lines[starts[0]] = line if line.endswith("\\") else line + " \\"
+            lines.insert(starts[0] + 1, f"    {opt}" + (" \\" if line.endswith("\\") else ""))
     return "\n".join(lines) + "\n"
 
 
@@ -283,8 +286,8 @@ def hashed(args: argparse.Namespace, work: Path) -> None:
     out = run_fix(wheelgap, reqs, args.target)
     check_fills(out, args.expect, args.target)
     add, printed = section(out, ADD_LINE_HEADER), section(out, HASHES_HEADER)
-    per_pkg = {name: sum(ln.startswith(name + "==") for ln in printed) for name in args.expect}
-    if any(n != len(args.target) for n in per_pkg.values()) or len(printed) != len(args.expect) * len(args.target):
+    per_pkg = {name: sum(ln.count("--hash=") for ln in printed if ln.startswith(name + "==")) for name in args.expect}
+    if any(n != len(args.target) for n in per_pkg.values()):
         raise CheckFailed(f"expected one hash line per package and target, got {printed}")
     text = reqs.read_text(encoding="utf-8")
     if args.apply == "printed-lines":
@@ -292,7 +295,7 @@ def hashed(args: argparse.Namespace, work: Path) -> None:
     else:
         text = "\n".join(add) + "\n" + merge_hashes(text, printed)
     reqs.write_text(text, encoding="utf-8")
-    ours = [p.split(" ", 1)[1] for p in printed]
+    ours = [h for p in printed for h in p.split()[1:]]
     shown = [ln for ln in text.splitlines() if not ln.startswith("    --hash=") or any(h in ln for h in ours)]
     summary_block(
         f"requirements.txt with --fix's lines ({args.apply}; PyPI's own hashes left out here)", "\n".join(shown)

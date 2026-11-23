@@ -108,6 +108,10 @@ class Package:
     # Distribution selection policy from requirements files or uv project configuration.
     no_binary: bool = False
     only_binary: bool = False
+    # A requirements file's release control for this package, as pip's ReleaseControl.allows_prereleases gives it
+    # (--pre, --all-releases, --only-final): True takes pre-releases, False never does (a pinned one is an error), and
+    # None is the default: a pre-release only when the range names one or nothing else matches.
+    prereleases: bool | None = None
     # The relevant uv setting(s), used to explain a gap caused by the configured policy.
     install_policy: str | None = None
     # PyPI project metadata URLs (project_urls and home_page).
@@ -1987,6 +1991,8 @@ _VALUE_OPTIONS = (
     "--use-feature",
     "--hash",
     "--config-settings",
+    "--all-releases",
+    "--only-final",
 )
 _FLAG_OPTIONS = ("--no-index", "--pre", "--prefer-binary", "--require-hashes")
 
@@ -2064,13 +2070,58 @@ def _line_include(tokens: list[str], label: str) -> tuple[bool, str] | None:
 
 
 class _FormatControl:
-    """Matches pip's FormatControl for --no-binary and --only-binary options in requirements files."""
+    """Matches pip's FormatControl for --no-binary and --only-binary options in requirements files, and the other
+    finder options of option lines that change which file or release pip picks: its ReleaseControl (--pre,
+    --all-releases, --only-final; pip/_internal/models/release_control.py) and --prefer-binary."""
 
     def __init__(self) -> None:
         self.no_binary: set[str] = set()
         self.only_binary: set[str] = set()
+        self.all_releases: set[str] = set()
+        self.only_final: set[str] = set()
+        # Where a release option or --prefer-binary was first read (`base.txt:1 sets --pre`), for --deps to refuse and
+        # the CLI's note.
+        self.release_set: str | None = None
+        self.prefer_binary: str | None = None
+
+    def apply_release(self, option: str, value: str) -> None:
+        """--all-releases or --only-final, as ReleaseControl.handle_mutual_excludes reads its value: `:all:` clears
+        both sets, and a name after it counts only after a `:none:`."""
+        target, other = (
+            (self.all_releases, self.only_final) if option == "--all-releases" else (self.only_final, self.all_releases)
+        )
+        new = value.split(",")
+        while ":all:" in new:
+            other.clear()
+            target.clear()
+            target.add(":all:")
+            del new[: new.index(":all:") + 1]
+            if ":none:" not in new:
+                return
+        for item in new:
+            if item == ":none:":
+                target.clear()
+                continue
+            key = canonicalize_name(item)
+            other.discard(key)
+            target.add(key)
+
+    def allows_prereleases(self, key: str) -> bool | None:
+        """ReleaseControl.allows_prereleases: a package named in a set wins over :all:."""
+        if key in self.all_releases:
+            return True
+        if key in self.only_final:
+            return False
+        if ":all:" in self.all_releases:
+            return True
+        if ":all:" in self.only_final:
+            return False
+        return None
 
     def apply(self, option: str, value: str) -> None:
+        if option in ("--all-releases", "--only-final"):
+            self.apply_release(option, value)
+            return
         target, other = (
             (self.no_binary, self.only_binary) if option == "--no-binary" else (self.only_binary, self.no_binary)
         )
@@ -2169,6 +2220,61 @@ def _apply_format_options(line: str, format_control: _FormatControl) -> bool:
         if val:
             format_control.apply(option, val)
     return True
+
+
+def _apply_release_options(line: str, format_control: _FormatControl, where: str, handled: bool) -> None:
+    """The release options and --prefer-binary of a line of options, as pip 26.3 applies them. --all-releases and
+    --only-final change the install's settings from their parser callbacks, so they count on any line pip parses.
+    --pre and --prefer-binary count only where pip hands the line to handle_option_line (`handled`): not on a line
+    with -r or -c, whose file pip reads instead, so `--pre -r base.txt` takes no pre-release. `--pre` adds `:all:` to
+    the releases it allows, as handle_option_line does, without clearing --only-final's names."""
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return  # _read_requirements has refused the line already
+    refused = f"{where}: pip refuses this line:"
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if token == "--":
+            break
+        value: str | None
+        if token.startswith("--"):
+            option, eq, given = token.partition("=")
+            matches = (
+                [option] if option in _LONG_LINE_OPTIONS else [n for n in _LONG_LINE_OPTIONS if n.startswith(option)]
+            )
+            if len(matches) != 1:
+                continue
+            name, entry, value = matches[0], _LONG_LINE_OPTIONS[matches[0]], given if eq else None
+        elif token.startswith("-") and token[:2] in _SHORT_LINE_OPTIONS:
+            entry = _SHORT_LINE_OPTIONS[token[:2]]
+            name, value = entry[0][1], token[2:] or None
+        else:
+            continue
+        if entry[1] and value is None:
+            value = tokens[i] if i < len(tokens) else None
+            i += 1
+        if name in ("--all-releases", "--only-final"):
+            if value is None:
+                raise SourceError(f"{refused} {name} option requires 1 argument")
+            if value.startswith("-"):
+                raise SourceError(f"{refused} --all-releases / --only-final option requires 1 argument.")
+            format_control.apply_release(name, value)
+            format_control.release_set = format_control.release_set or f"{where} sets {name}"
+        elif name == "--pre" and handled:
+            format_control.all_releases.add(":all:")
+            format_control.release_set = format_control.release_set or f"{where} sets --pre"
+        elif name == "--prefer-binary" and handled:
+            format_control.prefer_binary = format_control.prefer_binary or where
+
+
+def _is_prerelease(version: str) -> bool:
+    try:
+        return Version(version).is_prerelease
+    except InvalidVersion:  # an === pin of a version PEP 440 can't read: pip's filter keeps it
+        return False
 
 
 def _pin_specifier(version: str) -> str:
@@ -2332,6 +2438,22 @@ def _finalize_requirements(
     for pkg in pkgs:
         if not pkg.skip:
             pkg.no_binary, pkg.only_binary = format_control.policy(pkg.key)
+            pkg.prereleases = format_control.allows_prereleases(pkg.key)
+            if pkg.prereleases is False and pkg.version and not pkg.error and _is_prerelease(pkg.version):
+                # pip filters the candidates with prereleases=False, which leaves out even the one a pin names: pip
+                # 26.3 with `--only-final :all:` and `demo==2.0rc1` says "Could not find a final version".
+                pkg.error = (
+                    f"pip installs only final releases of {pkg.name} here (--only-final), so it finds no "
+                    f"{pkg.version} (pip refuses this)"
+                )
+    # These change which release pip picks for every dependency too, and the resolver doesn't read them yet.
+    if format_control.release_set:
+        deps_blockers.append(f"{format_control.release_set}, which changes the releases pip picks for dependencies")
+    if format_control.prefer_binary:
+        deps_blockers.append(
+            f"{format_control.prefer_binary} sets --prefer-binary, which changes the releases pip picks for "
+            "dependencies"
+        )
     return Source(
         path.name,
         pkgs,
@@ -2379,7 +2501,7 @@ def _include_error(path: Path, number: int | None, line: str, error: OSError, st
 # only --hash and --config-settings, and never calls handle_option_line for the line, so the index, include and
 # finder options are dropped ("ignored"). Some still take effect, because their parser callback changes the install's
 # own settings as the line is parsed: --no-binary and --only-binary ("format", which wheelgap reads) and
-# --all-releases and --only-final ("release", which wheelgap doesn't), for the whole install. -e makes the line's
+# --all-releases and --only-final ("release", which wheelgap reads too), for the whole install. -e makes the line's
 # requirement an editable one, which pip refuses for a name. --use-feature turns the feature on for the run (its
 # parser list is shared), and no feature changes which file pip picks. Each entry: spellings, takes a value, kind.
 _REQUIREMENT_LINE_OPTIONS: tuple[tuple[tuple[str, ...], bool, str], ...] = (
@@ -2419,12 +2541,12 @@ def _requirement_options(
     text: str, where: str
 ) -> tuple[bool, list[tuple[str, str]], list[tuple[str, str]], frozenset[str]]:
     """Reads the options after a requirement (`name>=1 --no-binary name`) as pip's optparse reads them: long options
-    by any unambiguous prefix, `--opt=value`, `-fVALUE`. Returns whether there's a --hash, each --no-binary or
-    --only-binary as (long name, value) in order, for the install's format control, what pip ignores there, for
-    a note: each option as
-    (the name it was written with, its long name), and words that aren't options, which optparse sets aside, as one
-    entry, and the frozenset of sha256 digests from --hash options. SourceError where pip refuses
-    the line, or where it applies an option that wheelgap doesn't read."""
+    by any unambiguous prefix, `--opt=value`, `-fVALUE`. Returns whether there's a --hash; each --no-binary,
+    --only-binary, --all-releases or --only-final as (long name, value) in order, for the install's format and release
+    control; what pip ignores there, for a note: each option as (the name it was written with, its long name), and
+    words that aren't options, which optparse sets aside, as one entry; and the frozenset of sha256 digests from
+    --hash options. SourceError where pip refuses the line, or where it applies an option that wheelgap doesn't read
+    (-e)."""
     try:
         tokens = shlex.split(text)
     except ValueError:
@@ -2475,6 +2597,8 @@ def _requirement_options(
         # The checks pip's parser callbacks make (the first is a CommandError, the others optparse errors).
         if kind == "format" and given_value.startswith("-"):
             raise SourceError(f"{refused} --no-binary / --only-binary option requires 1 argument.")
+        if kind == "release" and given_value.startswith("-"):
+            raise SourceError(f"{refused} --all-releases / --only-final option requires 1 argument.")
         if kind == "hash":
             if ":" not in given_value:
                 raise SourceError(
@@ -2495,16 +2619,13 @@ def _requirement_options(
                 f"{where}: pip reads {name} after a requirement as making that requirement editable, and refuses it "
                 'for a name ("is not a valid editable requirement"); put the editable on a line of its own'
             )
-        if kind == "release":
-            raise SourceError(
-                f"{where}: pip applies {name} after a requirement to the whole install, and it can change which "
-                "release pip picks; wheelgap doesn't read it"
-            )
         if kind == "ignored":
             ignored.append((name, names[-1]))  # -f and --find-links are one option
         hashed = hashed or kind == "hash"
-        if kind == "format" and given_value:
-            formats.append((name, given_value))  # the value pip's callback reads, never a word after another option
+        if kind in ("format", "release") and given_value:
+            # The value pip's callback reads, never a word after another option; the callback applies it to the whole
+            # install, exactly as on a line of its own.
+            formats.append((name, given_value))
     return hashed, formats, ignored, frozenset(sha256_hashes)
 
 
@@ -2580,6 +2701,8 @@ def _read_requirements(
                 include = _line_include(tokens, path.name)
             if include and format_control is not None:
                 _apply_format_options(line, format_control)  # pip applies `--no-binary X -r f` before reading f
+                where = _shown(path, stack) + (f":{number}" if number is not None else "")
+                _apply_release_options(line, format_control, where, handled=False)
             if include and include[0]:
                 target = include[1]
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
@@ -2644,6 +2767,8 @@ def _read_requirements(
             if line.startswith("-"):
                 if format_control is not None:
                     _apply_format_options(line, format_control)
+                    where = _shown(path, stack) + (f":{number}" if number is not None else "")
+                    _apply_release_options(line, format_control, where, handled=True)
                 continue  # pip options: --index-url, --no-binary, --hash continuation, ...
             # The requirement ends where pip ends it: before the first word, split at single spaces, that starts
             # with "-" (break_args_options), so "name\t--no-binary x" is one requirement pip can't parse. The rest is
@@ -2665,6 +2790,8 @@ def _read_requirements(
                     # and the later option wins.
                     for format_option, format_value in formats:
                         format_control.apply(format_option, format_value)
+                        if format_option in ("--all-releases", "--only-final"):
+                            format_control.release_set = format_control.release_set or f"{where} sets {format_option}"
             if already_seen:
                 continue
             # Only on requirement lines: a --hash or "# via" in a constraints file never marked the input compiled.

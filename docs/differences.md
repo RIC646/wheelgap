@@ -47,10 +47,10 @@ This page summarizes each difference, what wheelgap assumes, what installers do,
 
 ## Pre-releases and prefer-binary
 
-- **What wheelgap assumes:** `--pre` and `--prefer-binary` lines in requirements files are skipped, so an unpinned requirement is checked at the newest stable release (a pre-release counts only when no stable release matches).
-- **What pip does:** With `--pre`, pip takes the newest release including alphas, betas and release candidates; with `--prefer-binary`, it takes an older release that has a wheel over a newer one that only has an sdist. uv ignores both lines with a warning.
-- **When it changes the answer:** pip installs a different release from the one wheelgap checked, so any status can be off in either direction: for example the stable release has a wheel (`wheel`) but the pre-release pip installs under `--pre` has none.
-- **Tracking:** Tracked in [#634](https://github.com/wheelgap/wheelgap/issues/634).
+- **What wheelgap assumes:** After 0.13.0, `--pre`, `--all-releases` and `--only-final` lines in requirements files are read as pip reads them, so an unpinned requirement is checked at the release pip picks, pre-releases included where they're allowed. `--prefer-binary` is read but not followed: an unpinned requirement is still checked at the newest matching release, with a note on stderr that says so. `--deps` refuses a file with any of these options.
+- **What pip does:** With `--prefer-binary`, pip takes an older release that has a wheel over a newer one that only has an sdist. uv ignores `--pre` and `--prefer-binary` lines with a warning (a `uv pip install` line in a Dockerfile that reads such a file is an error).
+- **When it changes the answer:** Under `--prefer-binary`, for an unpinned requirement whose newest release has no wheel for a target, wheelgap says `source` where pip installs an older release's wheel. Pinned requirements aren't affected.
+- **Tracking:** [#634](https://github.com/wheelgap/wheelgap/issues/634) made `--pre` count and added the `--prefer-binary` note; picking the release `--prefer-binary` picks isn't tracked yet.
 
 ## User and system configuration
 

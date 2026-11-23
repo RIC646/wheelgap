@@ -1771,6 +1771,19 @@ def note_unpinned_requirements(sources: list[Source]) -> None:
         )
 
 
+def note_prefer_binary(sources: list[Source]) -> None:
+    """A requirements file with --prefer-binary and an unpinned requirement: pip may take an older release that has a
+    wheel than the newest, which is the one checked. A pin isn't affected."""
+    for source in sources:
+        fc = source.format_control
+        if source.requirements and fc is not None and fc.prefer_binary and unpinned_requirement_names(source):
+            print(
+                f"wheelgap: note: {fc.prefer_binary} sets --prefer-binary: for an unpinned requirement pip may take "
+                "an older release that has a wheel, and wheelgap checked the newest",
+                file=sys.stderr,
+            )
+
+
 def _names(names: list[str]) -> str:
     return ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
 
@@ -2735,6 +2748,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             )
     if not quiet:
         note_unpinned_requirements(sources)
+        note_prefer_binary(sources)
         for source in sources:
             if source.poetry_extras_unsure is not None:
                 print(f"wheelgap: note: {source.label}: {source.poetry_extras_unsure}", file=sys.stderr)

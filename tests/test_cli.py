@@ -470,6 +470,94 @@ def test_requirement_line_option_pip_ignores_is_a_note(capsys, fake_pypi, tmp_pa
     assert code == 1 and "pip ignores" not in err
 
 
+def _prelib(capsys, tmp_path, text, *argv):
+    req = tmp_path / "requirements.txt"
+    req.write_text(text, encoding="utf-8")
+    code, out, err = run(capsys, str(req), "-t", "linux-x86_64", "--json", *argv)
+    return code, json.loads(out)["packages"] if code in (0, 1) else None, err
+
+
+@pytest.mark.parametrize("argv", [["-p", "3.13"], ["-p", "3.12,3.13"]])
+@pytest.mark.parametrize(
+    ("text", "version", "status"),
+    [
+        # pip 26.3: `--pre` then `demo>=0.5` installs demo-2.0rc1; without it, demo-1.0 (#634).
+        ("prelib>=0.5\n", "1.0", "wheel"),
+        ("--pre\nprelib>=0.5\n", "2.0rc1", "source"),
+        ("prelib>=0.5\n--pre\n", "2.0rc1", "source"),
+        ("prelib\n", "1.0", "wheel"),
+        ("--pre\nprelib\n", "2.0rc1", "source"),  # a bare name too
+        ("--all-releases prelib\nprelib\n", "2.0rc1", "source"),
+        ("--pre\n--only-final prelib\nprelib>=0.5\n", "1.0", "wheel"),
+        ("--pre\nprelib==1.0\n", "1.0", "wheel"),  # a pin isn't affected
+        ("--pre -r base.txt\n", "1.0", "wheel"),  # pip ignores --pre on a -r line
+    ],
+)
+def test_requirements_pre_picks_the_release_pip_installs(capsys, fake_pypi, tmp_path, text, version, status, argv):
+    (tmp_path / "base.txt").write_text("prelib>=0.5\n", encoding="utf-8")
+    code, packages, err = _prelib(capsys, tmp_path, text, *argv)
+    (pkg,) = packages
+    assert code == (1 if status == "source" else 0)
+    labels = [label for label in pkg["results"]]
+    assert {pkg["results"][label] for label in labels} == {status}
+    versions = {pkg["version"]} if "versions" not in pkg else set(pkg["versions"].values())
+    assert versions == {version}
+    if text != "--pre\nprelib==1.0\n":
+        assert "unpinned package (prelib), so the newest matching release was checked" in err
+
+
+def test_requirements_pre_on_a_simple_index(capsys, fake_simple, tmp_path):
+    code, packages, _ = _prelib(
+        capsys, tmp_path, "--pre\nprelib>=0.5\n", "-p", "3.13", "--index-url", "https://simple.example/simple"
+    )
+    assert code == 1 and packages[0]["version"] == "2.0rc1" and packages[0]["results"]["linux-x86_64"] == "source"
+    code, packages, _ = _prelib(
+        capsys, tmp_path, "prelib>=0.5\n", "-p", "3.13", "--index-url", "https://simple.example/simple"
+    )
+    assert code == 0 and packages[0]["version"] == "1.0"
+
+
+def test_requirements_only_final_refuses_a_pinned_pre_release(capsys, fake_pypi, tmp_path):
+    code, packages, _ = _prelib(capsys, tmp_path, "--only-final :all:\nprelib==2.0rc1\n", "-p", "3.13")
+    assert code == 1 and packages[0]["results"]["linux-x86_64"] == "unknown"
+    assert "pip installs only final releases of prelib here (--only-final)" in packages[0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("text", "noted"),
+    [
+        ("--prefer-binary\nprelib>=0.5\n", True),
+        ("--prefer-binary\nprelib\n", True),
+        ("--prefer-binary\nprelib==1.0\n", False),  # pinned: pip installs that release, wheel or not
+        ("prelib>=0.5\n", False),
+        ("prelib>=0.5 --prefer-binary\n", False),  # pip ignores it after a requirement (another note says so)
+    ],
+)
+def test_requirements_prefer_binary_note_only_for_unpinned(capsys, fake_pypi, tmp_path, text, noted):
+    code, _, err = _prelib(capsys, tmp_path, text, "-p", "3.13")
+    note = (
+        "wheelgap: note: requirements.txt:1 sets --prefer-binary: for an unpinned requirement pip may take an older "
+        "release that has a wheel, and wheelgap checked the newest\n"
+    )
+    assert code == 0 and (note in err) is noted
+    _, _, err = _prelib(capsys, tmp_path, text, "-p", "3.13", "-q")
+    assert "--prefer-binary:" not in err
+
+
+@pytest.mark.parametrize(
+    ("line", "named"),
+    [("--pre", "base.txt:1 sets --pre"), ("--prefer-binary", "base.txt:1 sets --prefer-binary")],
+)
+def test_requirements_deps_refuses_pre_and_prefer_binary(capsys, fake_pypi, tmp_path, line, named):
+    (tmp_path / "base.txt").write_text(f"{line}\nprelib>=0.5\n", encoding="utf-8")
+    code, _, err = _prelib(capsys, tmp_path, "-r base.txt\n", "-p", "3.13", "--deps")
+    assert code == 2
+    assert (
+        f"requirements.txt: --deps can't follow this the way pip does ({named}, which changes the releases pip "
+        "picks for dependencies), so check a lockfile instead"
+    ) in err
+
+
 def test_requirements_include_cycle_exits_2(capsys, tmp_path, monkeypatch):
     # pip refuses an include cycle, so wheelgap does too: exit code 2, and the same error with
     # --github-annotations, since the file is parsed before any line is looked up (#603).

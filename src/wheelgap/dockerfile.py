@@ -117,6 +117,20 @@ class UnknownImageError(DockerfileError):
     image: str | None = None
 
 
+class HeredocSyntaxError(UnknownImageError):
+    """A `# syntax=` frontend may read an instruction's heredocs differently from docker/dockerfile 1.16 and later,
+    so wheelgap can't tell which lines are instructions, and so which FROM names the final image. `-p` and `-t`
+    stand in for the image, as for any UnknownImageError; --dockerfile-inputs needs the instructions themselves,
+    and there only a change to the `# syntax=` line helps (see for_inputs). `line` is the instruction's line and
+    `reason` the message with no location and no advice."""
+
+    reason: str = ""
+
+    def for_inputs(self) -> str:
+        """The message for --dockerfile-inputs, which -p and -t don't help."""
+        return f"{self.reason}; drop the # syntax= line, or set it to docker/dockerfile:1 (the newest 1.x)"
+
+
 @dataclass(frozen=True)
 class ImageTarget:
     python: str
@@ -657,6 +671,8 @@ def _parse_froms(
     build_args: Mapping[str, str] | None = None,
     instructions: list[tuple[int, str]] | None = None,
     bodies: dict[int, list[str]] | None = None,
+    *,
+    as_116: bool = False,
 ) -> tuple[list[tuple[int, str]], _GlobalArgs]:
     """(line number, arguments) of every FROM instruction in order, the line being where the instruction starts.
 
@@ -673,12 +689,12 @@ def _parse_froms(
     That's docker/dockerfile 1.16 and later. With no `# syntax=` line, wheelgap assumes Docker's built-in frontend
     is too: a known limit, since the classic builder and older built-in frontends read heredocs differently or not
     at all (to them, `FROM base` after `RUN : << '#'` is an instruction). A `# syntax=` frontend that reads a line's
-    heredocs differently from 1.16 is an error (see _heredoc_rules).
+    heredocs differently from 1.16 is an error (see _heredoc_rules), unless `as_116` asks for 1.16's reading anyway.
     """
     lines = [raw.rstrip("\r") for raw in text.split("\n")]  # Docker's trimNewline drops every trailing \r
     escape = _escape_char(lines)
     syntax = _syntax_directive(lines)
-    rules = _heredoc_rules(syntax)
+    rules = 16 if as_116 else _heredoc_rules(syntax)
     esc = re.escape(escape)
     continued = re.compile(rf"(?<!{esc}){esc}[ \t]*$")  # one escape char at the end, not two
     found: list[tuple[int, str]] = []
@@ -712,7 +728,7 @@ def _parse_froms(
             # heredoc body never gets here, so `RUN <<EOF` with an ARG in its body isn't read as one.
             args_before_from.append((instruction, joined))
 
-    def heredocs_in(instruction: str) -> deque[tuple[str, bool]]:
+    def heredocs_in(instruction: str, line_number: int) -> deque[tuple[str, bool]]:
         docs = deque(_heredocs(instruction, escape))
         if rules == 16 or (args := _heredoc_args(instruction, escape)) is None:
             return docs
@@ -726,10 +742,14 @@ def _parse_froms(
                 or (rules < 9 and args.startswith("["))
             )
         if differs:
-            raise DockerfileError(
+            reason = (
                 f"# syntax={syntax} may read the heredocs in {instruction.strip()[:60]!r} differently from "
-                "docker/dockerfile 1.16 and later, which wheelgap follows, pass -p/-t instead"
+                "docker/dockerfile 1.16 and later, which wheelgap follows"
             )
+            error = HeredocSyntaxError(f"{reason}, pass -p/-t instead")
+            error.line = line_number
+            error.reason = reason
+            raise error
         return docs
 
     owner = 0  # the line of the instruction whose heredoc bodies are being read
@@ -756,11 +776,11 @@ def _parse_froms(
         # splitCommand: strings.TrimSpace, https://github.com/moby/buildkit/blob/cedaeca/frontend/dockerfile/parser/split_command.go
         owner = start if parts else number
         finish(instruction.strip(_GO_SPACES), joined=bool(parts), line_number=owner)
-        heredocs = heredocs_in(instruction)
+        heredocs = heredocs_in(instruction, owner)
         parts = []
     if parts:  # the file ended mid-continuation: Docker still reads what's there
         finish("".join(parts).strip(_GO_SPACES), joined=len(parts) > 1, line_number=start)
-        heredocs = heredocs_in("".join(parts))
+        heredocs = heredocs_in("".join(parts), start)
     if heredocs:
         raise DockerfileError(f"unterminated heredoc <<{heredocs[0][0]} (BuildKit rejects it)")
     return found, _global_arg_defaults(args_before_from, build_args)
@@ -893,13 +913,13 @@ def final_from(text: str) -> tuple[str, str | None, int]:
 
 
 def _final_from(
-    text: str, build_args: Mapping[str, str] | None = None
+    text: str, build_args: Mapping[str, str] | None = None, *, as_116: bool = False
 ) -> tuple[str, str | None, int, dict[str, str], _GlobalArgs]:
     """final_from, plus the global ARG defaults that FROM used. Build arguments are expanded in every FROM, as
     Docker does, but one wheelgap can't expand is an error only in the FROM that names the final image: an
     earlier stage built `--platform=$BUILDPLATFORM` doesn't change the image the last stage runs on."""
     stages: dict[str, tuple[str, str | None, int, dict[str, str]]] = {}
-    lines, global_args = _parse_froms(text, build_args)
+    lines, global_args = _parse_froms(text, build_args, as_116=as_116)
     if not lines:
         raise DockerfileError("no FROM line found")
     errors: dict[int, UnknownImageError] = {}
@@ -1046,6 +1066,28 @@ def read_dockerfile(path: Path, build_args: Mapping[str, str] | None = None) -> 
     try:
         image, platform, number, used, global_args = _final_from(text, build_args)
         target = parse_image(image, platform)
+    except HeredocSyntaxError as e:  # raised before any FROM is chosen, so it names its own line
+        located = HeredocSyntaxError(f"{path}:{e.line}: {e}")
+        located.line = e.line
+        located.reason = e.reason
+        # -p and -t stand in only for how the heredoc is read. Read the file again as docker/dockerfile 1.16 does,
+        # for the final image's tag (the Alpine (musl) note) and an error in the image that reading names.
+        try:
+            image, platform, number, _, _ = _final_from(text, build_args, as_116=True)
+        except DockerfileError:
+            # An unknown stage, or an error in reading the instructions (an unterminated heredoc): the old frontend
+            # may read those lines another way (`RUN echo hi << EOF` under 1.4 has no heredoc), so the refusal stands.
+            raise located from None
+        located.image = image
+        try:
+            parse_image(image, platform)
+        except UnknownImageError:
+            pass
+        except DockerfileError as plain:
+            # FROM scratch: a heredoc body seldom holds a FROM, so the old frontend almost surely ends there too.
+            where = f"{path}:{number}" if str(plain).startswith("FROM scratch") else path
+            raise DockerfileError(f"{where}: {plain}") from None
+        raise located from None
     except UnknownImageError as e:
         error = UnknownImageError(f"{path}: {e}")
         error.line = e.line if e.line is not None else number
@@ -3175,7 +3217,10 @@ def _dockerfile_requirements(
         )
     instructions: list[tuple[int, str]] = []
     bodies: dict[int, list[str]] = {}
-    froms, global_args = _parse_froms(text, build_args, instructions=instructions, bodies=bodies)
+    try:
+        froms, global_args = _parse_froms(text, build_args, instructions=instructions, bodies=bodies)
+    except HeredocSyntaxError as e:  # -p and -t don't say which lines are instructions
+        raise DockerfileError(f"line {e.line}: {e.for_inputs()}") from None
     if report is None:
         report = InputsReport()
     if _heredoc_rules(syntax) is None:  # a digest-pinned docker/dockerfile: any version, so any `<<` may be a heredoc

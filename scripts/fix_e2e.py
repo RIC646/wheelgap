@@ -181,7 +181,8 @@ def run_fix(wheelgap: Path, reqs: Path, targets: list[str], extra: list[str] | N
     # The check still reports PyPI's gaps, so 1; 0 would mean PyPI has the wheels now (the test needs new pins),
     # and 2 is an error.
     if code != 1:
-        raise CheckFailed(f"wheelgap --fix exited {code}, expected 1 (gaps found)")
+        hint = ": PyPI may have every wheel now, so the test needs new pins (PINS here, --expect in fix-e2e.yml)"
+        raise CheckFailed(f"wheelgap --fix exited {code}, expected 1 (gaps found)" + (hint if code == 0 else ""))
     return out
 
 
@@ -206,7 +207,11 @@ def check_fills(out: str, expect: set[str], targets: list[str]) -> None:
             raise CheckFailed(f"unexpected line under {FILLS_HEADER!r}: {ln!r}")
         named[m[1]] = m[3].split(", ")
     if set(named) != expect:
-        raise CheckFailed(f"--fix names {sorted(named)}, expected exactly {sorted(expect)}")
+        gone = sorted(expect - set(named))
+        hint = ""
+        if gone:
+            hint = f" PyPI may now have wheels for {gone}: pick other pins (PINS here, --expect in fix-e2e.yml)."
+        raise CheckFailed(f"--fix names {sorted(named)}, expected exactly {sorted(expect)}.{hint}")
     for name, filled in named.items():
         if sorted(filled) != sorted(targets):
             raise CheckFailed(f"--fix says {name} fills {filled}, expected {targets}")
@@ -224,7 +229,7 @@ def check_report(report: Path, expect: set[str]) -> None:
             bad.append(f"{name} came from {url}, expected a wheel under {want}")
     summary_block("What pip installed (from its --report)", "\n".join(rows))
     print("\n".join(rows))
-    if bad or {i["metadata"]["name"].lower() for i in items} < expect:
+    if bad or not expect <= {i["metadata"]["name"].lower() for i in items}:
         raise CheckFailed("; ".join(bad) or f"pip's report lacks one of {sorted(expect)}")
 
 

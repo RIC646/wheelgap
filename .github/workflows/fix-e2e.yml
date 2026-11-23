@@ -80,6 +80,7 @@ jobs:
         run: python scripts/fix_e2e.py hashed -t linux-x86_64,win-amd64 --expect lz4,zstandard
 
   windows:
+    name: windows, gap wheels used
     runs-on: windows-latest
     timeout-minutes: 20
     steps:

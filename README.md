@@ -11,27 +11,30 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 [![good first issues](https://img.shields.io/github/issues/wheelgap/wheelgap/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/wheelgap/wheelgap/labels/good%20first%20issue)
 
-**Find the Python dependencies that have no prebuilt wheel for your platform, before your Docker build does, and fill the gap with a verified wheel.**
+**Find the Python dependencies that have no prebuilt wheel for your platform, before your Docker build does, and get the exact change that fixes each one.**
 
-Point it at your lockfile and the platforms you ship to (ARM servers, Alpine images, Windows on ARM, Python 3.15, free-threaded 3.14t). It tells you which packages pip or uv will have to compile from source, and which can't be installed at all. With `--fix` it also says which of those gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/) fills, and prints the line that installs it:
+Point it at your lockfile and the platforms you ship to (ARM servers, Alpine images, Windows on ARM, Python 3.15, free-threaded 3.14t). It tells you which packages pip or uv will have to compile from source, and which can't be installed at all. With `--fix` it says how to close each gap: first the upgrade to an official release that has the wheel, with the command for your lockfile; then, only where you can't upgrade, an unofficial wheel from wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/):
 
 ```console
 $ uvx wheelgap requirements.txt -p 3.15 -t linux-x86_64,win-amd64 --fix
-package    version  linux-x86_64  win-amd64
-lz4        4.4.5    ● source      ● source
-orjson     3.13.0   ● source      ✓
-zstandard  0.25.0   ● source      ● source
+package     version  linux-x86_64  win-amd64
+markupsafe  3.0.2    ● source      ● source
+pyyaml      6.0.3    ● source      ● source
+zstandard   0.25.0   ● source      ● source
 ...
-wheelgap's gap wheel index has wheels PyPI lacks for:
-  lz4 4.4.5: linux-x86_64, win-amd64
-  orjson 3.13.0: linux-x86_64
-  zstandard 0.25.0: linux-x86_64, win-amd64
+--fix: 6 gaps (3 packages × their targets): 4 can be fixed by upgrading to an official release; 2 only by an unofficial gap wheel; 0 have no fix yet.
 
-To install them with pip, add this line to your requirements file:
-  --extra-index-url https://wheelgap.github.io/wheels/simple/
+Upgrade: a newer official release has the wheel:
+  markupsafe 3.0.2 -> 3.0.4: linux-x86_64, win-amd64
+  pyyaml 6.0.3 -> 6.0.4: linux-x86_64, win-amd64
+In requirements.txt, change the pins to markupsafe==3.0.4, pyyaml==6.0.4.
+
+As a fallback, wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the packages' maintainers) for:
+  zstandard 0.25.0: linux-x86_64, win-amd64
+...
 ```
 
-Each gap wheel is built twice from the sdist on PyPI, published only if both builds are byte-for-byte identical, and installed and imported on a fresh machine first ([how they're made](https://wheelgap.github.io/wheels/)). PyPI stays your main index; pip only takes a wheel from ours where PyPI has none for your machine.
+In 83 pinned projects from the 300 most-starred Python repositories, 82% of the Python 3.15 gaps were stale pins like these: the release with the wheel was already out. For a `uv.lock`, `--fix` prints the `uv lock --upgrade-package` command instead. Gap wheels are built twice from the sdist on PyPI, published only if both builds are byte-for-byte identical, and installed and imported on a fresh machine first ([how they're made](https://wheelgap.github.io/wheels/)).
 
 🔎 **Try it on any public repo, in your browser: [wheelgap.github.io/tracker/check](https://wheelgap.github.io/tracker/check/).** Paste a GitHub repository. It reads the lockfile, works out the platforms the repo ships to from its CI and Dockerfiles, and lists every dependency with no prebuilt wheel there, with the release that fixes it. Nothing to install.
 

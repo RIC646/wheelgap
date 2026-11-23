@@ -590,7 +590,7 @@ empty `FILE` is an error, as for `--junit`.
 
 ### `--fix` {#fix}
 
-After the usual output, say which gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/)
+**After 0.13.0.** Following the usual output, say which gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/)
 fills, and how to install from it: a `[tool.uv.index]` and `[tool.uv.sources]` snippet for `pyproject.toml` with a
 uv.lock input, the same entries for the `# /// script` block of a script (or of the script beside a script's lock,
 `example.py.lock`, then `uv lock --script example.py`), and an `--extra-index-url` line for pip otherwise. A cell counts only when it's `source` or `missing`
@@ -624,10 +624,9 @@ package and the targets it fills. The exit code is the check's own, so a run wit
 snippet; when no gap wheel fits, stdout is empty.
 
 - For one requirements file or package names on the command line: the `--extra-index-url` line, with pip's
-  dependency-confusion caveat, and for each package the `--hash=sha256:` options of its gap wheels (one per wheel,
-  so two for a package that fills two targets) to add to its existing line if the requirements pin hashes, keeping
-  the hashes already there. On a line of their own pip won't use them: it allows only the hashes all of a package's
-  lines share.
+  dependency-confusion caveat, and for each package the `--hash=sha256:` options of its gap wheels (one per wheel)
+  to add to its existing line if the requirements pin hashes, keeping the hashes already there. On a line of their
+  own pip won't use them: it allows only the hashes all of a package's lines share.
 - For one uv.lock: the `[[tool.uv.index]]` (with `explicit = true`) and `[tool.uv.sources]` entries for
   `pyproject.toml`, with a note for each package uv won't take from the index until it's listed as a direct
   dependency. Add them to an existing `[tool.uv.sources]` table rather than a second one, then run `uv lock`.

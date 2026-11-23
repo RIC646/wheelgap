@@ -154,7 +154,9 @@ def test_pixi_lock_entries_are_not_known(fake_pypi, tmp_path):
     assert pkg.found_on_pypi and not origin.known_pypi(pkg, source, env=EMPTY)
 
 
-@pytest.mark.parametrize("variable", [*origin.INDEX_ENV, "UV_INDEX_CORP_USERNAME", "PIP_index_url", "PIP_Find_Links"])
+@pytest.mark.parametrize(
+    "variable", [*origin.INDEX_ENV, "UV_INDEX_CORP_USERNAME", "PIP_index_url", "PIP_Find_Links", "PIP_PYPI_URL"]
+)
 def test_an_index_in_the_environment(fake_pypi, tmp_path, variable):
     env = {variable: "https://pypi.corp.example/simple"}
     pkg, source = package(tmp_path, {"requirements.txt": "nowheels==0.9\n"})

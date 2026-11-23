@@ -129,6 +129,15 @@ FAKE_INDEX = {
             "fixme-1.4.tar.gz",
         ],
     },
+    # 2.0 has the CPython 3.14 Linux wheel 1.0 lacks, but none for 3.13 (its Requires-Python leaves 3.13 out): pip
+    # can't take it on 3.13, while uv may lock 1.0 for 3.13 and 2.0 for 3.14 (a fork per Python).
+    "pyfork": {
+        "1.0": ["pyfork-1.0-cp313-cp313-manylinux_2_17_x86_64.whl", "pyfork-1.0.tar.gz"],
+        "2.0": [
+            {"filename": "pyfork-2.0-cp314-cp314-manylinux_2_17_x86_64.whl", "requires_python": ">=3.14"},
+            {"filename": "pyfork-2.0.tar.gz", "requires_python": ">=3.14"},
+        ],
+    },
     # Only an abi3 wheel for Windows on ARM: no use on free-threaded Python (--fix's "no fix yet" says so).
     "abi3only": {
         "1.0": ["abi3only-1.0-cp312-abi3-win_arm64.whl", "abi3only-1.0.tar.gz"],

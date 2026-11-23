@@ -1438,7 +1438,14 @@ def test_check_lockfile_fix_returns_the_gap_wheels(fake_pypi, gap_wheels, tmp_pa
             }
         }
     ]
-    assert fixed["fix_summary"] == {"gaps": 1, "upgrade": 0, "gap_wheel": 1, "none": 0}
+    assert fixed["fix_summary"] == {
+        "gaps": 1,
+        "upgrade": 0,
+        "gap_wheel": 1,
+        "none": 0,
+        "not_looked_up": 0,
+        "uv_may_fork": 0,
+    }
     # It never changes the answer: the gap is still PyPI's.
     assert fixed["gaps"] == data["gaps"] and fixed["ok"] is False and fixed["passes"] is False
 

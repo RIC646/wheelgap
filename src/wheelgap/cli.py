@@ -860,11 +860,13 @@ def render_explain(
     issues_urls: dict[int, str | None] | None = None,
     published_wheels: list[gapwheels.Fill] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
+    upgrades: dict[tuple[int, Target], str] | None = None,
 ) -> list[str]:
     """`conda_forge`: --conda-forge hints, `piwheels`: --piwheels hints, `build_info`: --build-info answers and
     `suggestions`: --suggest's, by id() of the row's package. `notes` and `builds` (the tracker's build lab results):
     --notes, by id() of the row. `published_wheels`: --fix's fills (from the gap wheel list, which may come from the
-    1-hour cache), shown once per release under its first filled target."""
+    1-hour cache), shown once per release under its first filled target. `upgrades`: --fix's, the release to move to by
+    (id(row), target), shown first under each target it fixes."""
     multi_py = len({t.python for t in targets}) > 1
     filled: dict[int, list[gapwheels.Fill]] = {}
     for fill in published_wheels or []:
@@ -905,8 +907,13 @@ def render_explain(
             if ask:
                 out.append(f"  ask for a wheel: {ask}")
                 ask = None
+            if (upgrade := (upgrades or {}).get((id(r), t))) is not None:
+                out.append(
+                    f"  upgrade: {r.package.name} {upgrade} has the wheel (an official release; see the --fix section)"
+                )
             if gap_wheel and any(f.target == t for f in gap_wheel):
-                out += [f"  {line}" for line in gapwheels.explain_lines(gap_wheel, multi_py)]
+                fallback = any((id(r), f.target) in (upgrades or {}) for f in gap_wheel)
+                out += [f"  {line}" for line in gapwheels.explain_lines(gap_wheel, multi_py, fallback)]
                 gap_wheel = None
             out.append("")
         if conda_forge and (h := conda_forge.get(id(r.package))):
@@ -1956,7 +1963,9 @@ def release_lookups(
     return suggestions, skipped
 
 
-FIX_HINT = "Run with --fix to see whether wheelgap's gap wheel index has a wheel for these."
+FIX_HINT = (
+    "Run with --fix for a way out: an upgrade where a newer release has the wheel, else wheelgap's gap wheel index."
+)
 
 
 def gap_wheel_candidates(
@@ -3131,7 +3140,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             if wheels is None:
                 fix_hint = FIX_HINT
             elif count := len(gapwheels.fillable(hint_rows, targets, source_of, wheels, private, index_url)):
-                fix_hint = f"Run with --fix: wheelgap's gap wheel index has a wheel for {count} of these gaps."
+                fix_hint = (
+                    "Run with --fix for a way out: an upgrade where a newer release has the wheel, else wheelgap's gap "
+                    f"wheel index, which has a wheel for {count} of these gaps."
+                )
 
     if args.print_gap_wheel_snippet:  # one input of gapwheels.SNIPPET_KINDS, checked when it was read
         multi_py = len({t.python for t in targets}) > 1
@@ -3240,6 +3252,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             fills,
             installed_by=installed_by,
             installed_through=installed_through,
+            fix_cells=fix_cells,
         ):
             write_command(command, sys.stderr if args.json or args.markdown else sys.stdout)
         for level, file, at_line, message in dockerfile_results(dockerfile_notes, dockerfile_warnings):
@@ -3334,7 +3347,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         not_covered=not_covered,
                     ),
                     *fix.markdown_lines(fix_cells or [], multi_py, unlooked, fix_issues),
-                    *gapwheels.markdown_lines(fills or [], multi_py, fix.alternatives(fix_cells or [])),
+                    *gapwheels.markdown_lines(
+                        fills or [], multi_py, fix.alternatives(fix_cells or []), fix.any_upgrade(fix_cells or [])
+                    ),
                     *(["", f"> **Warning:** {unseen_line}"] if unseen_line else []),
                     *dockerfile_markdown(dockerfile_results(dockerfile_notes)),
                 ]
@@ -3346,7 +3361,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     # Nothing without --fix or without a gap: the summary, upgrades and gaps with no fix, then the gap wheels.
     fix_lines = [
         *fix.text_lines(fix_cells or [], multi_py, unlooked, fix_issues),
-        *gapwheels.text_lines(fills or [], multi_py, fix.alternatives(fix_cells or [])),
+        *gapwheels.text_lines(
+            fills or [], multi_py, fix.alternatives(fix_cells or []), fix.any_upgrade(fix_cells or [])
+        ),
     ]
     total_pkgs = len(_group_rows(rows))
     if quiet:
@@ -3407,6 +3424,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 issues_urls=issues_urls,
                 published_wheels=fills,
                 pi_wheels=pi_wheels,
+                upgrades={
+                    (id(c.row), c.target): c.version for c in fix_cells or [] if c.kind == fix.UPGRADE and c.version
+                },
             ):
                 print(ln)
 

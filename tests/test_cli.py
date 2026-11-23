@@ -2524,9 +2524,13 @@ def _assert_matches_output_schema(data):
         assert key in data
     if "fix_summary" in data:
         fs = data["fix_summary"]
-        assert fs["gaps"] == fs["upgrade"] + fs["gap_wheel"] + fs["none"]
-        kinds = [e["kind"] for p in data["packages"] for e in p.get("fix", {}).values()]
-        assert fs == {"gaps": len(kinds), **{k: kinds.count(k) for k in ("upgrade", "gap_wheel", "none")}}
+        assert fs["gaps"] == sum(v for k, v in fs.items() if k != "gaps")
+        kinds = [
+            e.get("reason") if e.get("reason") in ("not_looked_up", "uv_may_fork") else e["kind"]
+            for p in data["packages"]
+            for e in p.get("fix", {}).values()
+        ]
+        assert fs == {"gaps": len(kinds), **{k: kinds.count(k) for k in set(fs) - {"gaps"}}}
     assert isinstance(data["version"], str) and data["version"]
     assert isinstance(data["sources"], list) and all(isinstance(s, str) for s in data["sources"])
     assert isinstance(data["ignored"], list) and all(isinstance(s, str) for s in data["ignored"])

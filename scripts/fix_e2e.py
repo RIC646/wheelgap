@@ -3,6 +3,7 @@
     python scripts/fix_e2e.py plain -t linux-x86_64 --expect lz4,zstandard --pypi-only build
     python scripts/fix_e2e.py plain -t win-amd64 --expect lz4,zstandard --pypi-only only-binary
     python scripts/fix_e2e.py hashed -t linux-x86_64,win-amd64 --expect lz4,zstandard
+    python scripts/fix_e2e.py upgrade -t linux-x86_64 --expect markupsafe,pyyaml
 
 It runs on the Python under test and uses only the standard library, so it needs nothing but that Python and the
 network. Every install goes into a fresh venv; wheelgap is installed from this checkout into a venv of its own.
@@ -18,6 +19,12 @@ network. Every install goes into a fresh venv; wheelgap is installed from this c
 3. installs the file with `pip install --report` (which only records what pip did) in a fresh venv: it must succeed,
    each `--expect` package must come from the gap wheel index's release files and every other package from PyPI;
 4. imports orjson, zstandard and lz4 and round-trips data through each.
+
+`upgrade` writes a requirements file with markupsafe 3.0.2 and PyYAML 6.0.3, which have no cp315 wheel while their
+newer official releases (3.0.4, 6.0.4) do: `pip install --only-binary=:all: -r` must find no wheel; `wheelgap --fix`
+must list both under "Upgrade: a newer official release has the wheel:", on every `-t` target, then the line
+"In requirements.txt, change the pins to ..."; that change is made literally, and `pip install --only-binary=:all:
+--report -r` from PyPI alone must then install exactly those releases as PyPI's wheels, which must import and work.
 
 `hashed` does the same from a fully hash-pinned file made by `uv pip compile --generate-hashes`, with --fix run for
 every `-t` target (a cross-platform file needs a gap wheel's hash for each target it fills). Under "If the
@@ -52,7 +59,26 @@ PYPI_FILES = "https://files.pythonhosted.org/"
 PINS = ["orjson==3.13.0", "zstandard==0.25.0", "lz4==4.4.5"]
 UV = "uv==0.13.9"  # only to make the hash-pinned file, the way a project would
 COMPILERS = ["cc", "gcc", "c++", "g++", "clang", "cargo", "rustc"]
-FILLS_HEADER = "wheelgap's gap wheel index has wheels PyPI lacks for:"
+FILLS_HEADER = (
+    "wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the "
+    "packages' maintainers) for:"
+)
+FALLBACK_HEADER = "As a fallback, " + FILLS_HEADER  # the same section when --fix names an upgrade first
+# `upgrade`: pins whose newer official release has the cp315 wheel for Linux x86_64 and Windows x64 (markupsafe 3.0.4,
+# PyYAML 6.0.4), and which have none themselves; PyYAML 6.0.3 also has a gap wheel for Linux, the fallback.
+UPGRADE_PINS = ["markupsafe==3.0.2", "pyyaml==6.0.3"]
+UPGRADES_HEADER = "Upgrade: a newer official release has the wheel:"
+UPGRADE_LINE = re.compile(r"(\S+) (\S+) -> (\S+): (.+)")
+PINS_LINE = re.compile(r"In requirements\.txt, change the pins to (.+)\.")
+UPGRADE_ROUND_TRIP = """
+import markupsafe, yaml
+from importlib.metadata import version
+assert str(markupsafe.escape("<wheelgap & 3.15>")) == "&lt;wheelgap &amp; 3.15&gt;"
+doc = {"name": "wheelgap", "python": "3.15", "nested": [1, 2.5, None, True]}
+assert yaml.safe_load(yaml.safe_dump(doc)) == doc
+for name in ("markupsafe", "pyyaml"):
+    print(name, version(name), "round-trip ok")
+"""
 ADD_LINE_HEADER = "To install them with pip, add this line to your requirements file:"
 HASHES_HEADER = (
     "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
@@ -201,10 +227,12 @@ def section(out: str, header: str) -> list[str]:
 
 def check_fills(out: str, expect: set[str], targets: list[str]) -> None:
     named = {}
-    for ln in section(out, FILLS_HEADER):
-        m = re.fullmatch(r"(\S+) (\S+): (.+)", ln)
+    header = FALLBACK_HEADER if FALLBACK_HEADER in out.splitlines() else FILLS_HEADER
+    for ln in section(out, header):
+        # A gap an upgrade also fixes ends in "(if you can't upgrade NAME)": the gap wheel is still listed.
+        m = re.fullmatch(r"(\S+) (\S+): (.+?)(?: \(if you can't upgrade \S+\))?", ln)
         if not m:
-            raise CheckFailed(f"unexpected line under {FILLS_HEADER!r}: {ln!r}")
+            raise CheckFailed(f"unexpected line under {header!r}: {ln!r}")
         named[m[1]] = m[3].split(", ")
     if set(named) != expect:
         gone = sorted(expect - set(named))
@@ -333,10 +361,64 @@ def hashed(args: argparse.Namespace, work: Path) -> None:
     install_and_use(work, reqs, args.expect, require_hashes=True)
 
 
+def upgrade(args: argparse.Namespace, work: Path) -> None:
+    """Pins a newer official release fixes: --fix must lead with that upgrade, and applying the pin line it prints,
+    literally, must install PyPI's own wheels with --only-binary=:all: (no gap wheel index)."""
+    reqs = work / "requirements.txt"
+    reqs.write_text("\n".join(UPGRADE_PINS) + "\n", encoding="utf-8")
+    pypi_only(work, reqs, "only-binary")
+    wheelgap = install_wheelgap(work)
+    out = run_fix(wheelgap, reqs, args.target)
+    named = {}
+    for ln in section(out, UPGRADES_HEADER):
+        m = UPGRADE_LINE.fullmatch(ln)
+        if not m:
+            raise CheckFailed(f"unexpected line under {UPGRADES_HEADER!r}: {ln!r}")
+        named[m[1]] = (m[3], sorted(m[4].split(", ")))
+    if set(named) != args.expect or any(ts != sorted(args.target) for _, ts in named.values()):
+        raise CheckFailed(f"--fix's upgrades are {named}, expected each of {sorted(args.expect)} on {args.target}")
+    lines = out.splitlines()
+    after = lines[lines.index(UPGRADES_HEADER) + 1 + len(named)]
+    m = PINS_LINE.fullmatch(after)
+    if not m:
+        raise CheckFailed(f"expected the pin line after the upgrades, got {after!r}")
+    pins = m[1].split(", ")
+    if sorted(pins) != sorted(f"{name}=={version}" for name, (version, _) in named.items()):
+        raise CheckFailed(f"the pin line {pins} doesn't match the upgrades {named}")
+    # Apply it literally: each pin replaces the line that pins that package.
+    text = reqs.read_text(encoding="utf-8").splitlines()
+    for pin in pins:
+        name = pin.split("==", 1)[0]
+        hits = [i for i, x in enumerate(text) if x.split("==", 1)[0] == name]
+        if len(hits) != 1:
+            raise CheckFailed(f"{name} is on {len(hits)} lines of requirements.txt, expected 1")
+        text[hits[0]] = pin
+    reqs.write_text("\n".join(text) + "\n", encoding="utf-8")
+    summary_block("requirements.txt with --fix's pins", reqs.read_text(encoding="utf-8"))
+    py = venv(work / "upgraded-venv")
+    report = work / "report.json"
+    cmd: list[str | Path] = [py, "-m", "pip", "install", "--only-binary=:all:", "--report", report, "-r", reqs]
+    code, out = run(cmd, title="With --fix's pins, PyPI alone, wheels only")
+    if code:
+        raise CheckFailed(f"pip install --only-binary=:all: with --fix's pins failed (exit code {code})")
+    items = json.loads(report.read_text(encoding="utf-8"))["install"]
+    rows = [f"{i['metadata']['name']} {i['metadata']['version']}  {i['download_info']['url']}" for i in items]
+    summary_block("What pip installed (from its --report)", "\n".join(rows))
+    got = {i["metadata"]["name"].lower(): (i["metadata"]["version"], i["download_info"]["url"]) for i in items}
+    for pin in pins:
+        name, version = pin.split("==", 1)
+        if got.get(name, ("", ""))[0] != version or not got[name][1].startswith(PYPI_FILES):
+            raise CheckFailed(f"expected PyPI's {pin} wheel, pip installed {got.get(name)}")
+    code, out = run([py, "-c", UPGRADE_ROUND_TRIP], title="Import and round-trip markupsafe and PyYAML")
+    summary_block(f"Import and round-trip (exit code {code})", out)
+    if code:
+        raise CheckFailed("importing or round-tripping the upgraded packages failed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     sub = parser.add_subparsers(dest="mode", required=True)
-    for name in ("plain", "hashed"):
+    for name in ("plain", "hashed", "upgrade"):
         p = sub.add_parser(name)
         p.add_argument("-t", "--target", required=True, type=lambda s: s.split(","), help="wheelgap target labels")
         p.add_argument("--expect", required=True, type=lambda s: set(s.split(",")), help="packages --fix must name")
@@ -346,7 +428,7 @@ def main() -> int:
     summary(f"### `{args.mode}` on Python {platform.python_version()}, {platform.platform()}", "")
     work = Path(tempfile.mkdtemp(prefix="fix-e2e-"))
     try:
-        plain(args, work) if args.mode == "plain" else hashed(args, work)
+        {"plain": plain, "hashed": hashed, "upgrade": upgrade}[args.mode](args, work)
     except CheckFailed as e:
         print(f"::error::{e}")
         summary(f"**Failed:** {e}")

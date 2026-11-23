@@ -249,12 +249,14 @@
             "type": "object",
             "description": "Present only with --fix (after 0.13.0): how many gap cells (a package on a target, source or missing, not ignored) each kind of packages[].fix covers. gaps is the sum of the other three; only upgrade counts as fixed by an official release (gap wheels are unofficial). It doesn't change summary or the exit code.",
             "additionalProperties": false,
-            "required": ["gaps", "upgrade", "gap_wheel", "none"],
+            "required": ["gaps", "upgrade", "gap_wheel", "none", "not_looked_up", "uv_may_fork"],
             "properties": {
-                "gaps": {"type": "integer", "minimum": 0, "description": "Gap cells."},
-                "upgrade": {"type": "integer", "minimum": 0, "description": "Gap cells a newer release fixes."},
-                "gap_wheel": {"type": "integer", "minimum": 0, "description": "Gap cells no newer release fixes but a gap wheel fills."},
-                "none": {"type": "integer", "minimum": 0, "description": "Gap cells with no fix yet."}
+                "gaps": {"type": "integer", "minimum": 0, "description": "Gap cells: the sum of the other five."},
+                "upgrade": {"type": "integer", "minimum": 0, "description": "Gap cells a newer official release fixes."},
+                "gap_wheel": {"type": "integer", "minimum": 0, "description": "Gap cells no newer release fixes (or whose releases weren't looked up) but an unofficial gap wheel fills."},
+                "none": {"type": "integer", "minimum": 0, "description": "Gap cells with no fix known: kind none with reason no_newer_release, loses_wheel or no_binary."},
+                "not_looked_up": {"type": "integer", "minimum": 0, "description": "Gap cells of kind none with reason not_looked_up: not checked for an upgrade, so not known to have no fix."},
+                "uv_may_fork": {"type": "integer", "minimum": 0, "description": "Gap cells of kind none with reason uv_may_fork."}
             }
         },
         "summary": {
@@ -438,16 +440,17 @@
                         "properties": {
                             "kind": {"enum": ["upgrade", "gap_wheel", "none"], "description": "The way out: upgrade, gap_wheel or none."},
                             "version": {"type": "string", "description": "kind upgrade: the release to move to. wheelgap doesn't resolve dependencies: the rest of them must allow it."},
-                            "how": {"type": "string", "description": "kind upgrade: what to run or change for this input, such as uv lock --upgrade-package NAME==VERSION for a uv.lock, or the pin to write in a requirements file."},
+                            "how": {"type": "string", "description": "kind upgrade: what to run or change for this input, such as uv lock --upgrade-package NAME for a uv.lock, or the pin to write in a requirements file."},
                             "constraint": {
                                 "type": ["object", "null"],
                                 "description": "kind upgrade: the user's own requirement for this package, where wheelgap reads one (a uv.lock's project dependencies, dependency groups and [manifest] constraints, or a ranged requirement in a requirements file, pyproject.toml, script or the command line), and whether the release fits it; null otherwise (a transitive dependency, a Poetry or PDM lock, an exact pin, a uv override).",
                                 "additionalProperties": false,
-                                "required": ["file", "requirements", "allows"],
+                                "required": ["file", "requirements", "allows", "via"],
                                 "properties": {
                                     "file": {"type": "string", "description": "Where the requirement is written, such as pyproject.toml or requirements.txt."},
                                     "requirements": {"type": "array", "items": {"type": "string"}, "description": "NAME and specifier, such as pyyaml>=6,<7: all of them when allows is true, only the ones that exclude the release when it's false."},
-                                    "allows": {"type": "boolean", "description": "Whether the release is within every one of them; false: the requirement needs relaxing first."}
+                                    "allows": {"type": "boolean", "description": "Whether the release is within every one of them; false: the requirement needs relaxing first."},
+                                    "via": {"enum": ["requirement", "constraint"], "description": "requirement: the package's own requirement in file; constraint: file's -c constraints, which pip applies too."}
                                 }
                             },
                             "gap_wheel": {
@@ -467,7 +470,7 @@
                             "sha256": {"type": "string", "description": "kind gap_wheel: the wheel's SHA-256, as 64 lowercase hex digits."},
                             "unofficial": {"enum": [true], "description": "kind gap_wheel: always true: built by wheelgap from PyPI's sdist (https://wheelgap.github.io/wheels/), not by the package's maintainers."},
                             "abi3_only": {"type": "boolean", "description": "kind none: true when the target is free-threaded and the checked release has abi3 wheels for its platform, which free-threaded Python can't use (as --explain's reason says); the package needs a cpXYt (or abi3t) wheel."},
-                            "reason": {"enum": ["no_newer_release", "loses_wheel", "not_looked_up", "no_binary"], "description": "kind none: no_newer_release (no newer release has a wheel for this target), loses_wheel (every newer release with one drops a wheel this package has elsewhere), not_looked_up (the releases weren't looked up: the package isn't known to be from PyPI, the run uses another index, or the lookup failed; a line in the text output says which), no_binary (a requirements file's --no-binary: pip uses no wheel for it)."}
+                            "reason": {"enum": ["no_newer_release", "loses_wheel", "uv_may_fork", "not_looked_up", "no_binary"], "description": "kind none: no_newer_release (no newer release has a wheel for this target), loses_wheel (every newer release with one drops a wheel this package has elsewhere), uv_may_fork (a uv.lock where what they drop is only another Python's wheel: uv may lock a release per Python, so try uv lock --upgrade-package NAME and check again), not_looked_up (the releases weren't looked up: the package isn't known to be from PyPI, the run uses another index, or the lookup failed; a line in the text output says which), no_binary (a requirements file's --no-binary: pip uses no wheel for it)."}
                         }
                     }
                 },

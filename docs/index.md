@@ -25,7 +25,7 @@ linux-aarch64  3 from source
 musl-aarch64   3 from source
 3 of 5 packages have gaps: 3 will build from source.
 Run with --explain to see which wheels were rejected and why.
-Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.
+Run with --fix for a way out: an upgrade where a newer release has the wheel, else wheelgap's gap wheel index.
 ```
 
 (That's the test project in `tests/fixtures/uvproj`, which needs no network. The last line, `Run with --fix …`, is

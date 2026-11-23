@@ -200,9 +200,15 @@ def to_json(fills: list[Fill], multi_py: bool) -> list[dict]:
 UNOFFICIAL = "unofficial, built by wheelgap from the PyPI sdist; not from the package's maintainers"
 # --fix's gap wheel section: after the upgrades to official releases, so the fallback.
 HEAD = (
-    "As a fallback, wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, "
-    "not by the packages' maintainers) for:"
+    "wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the "
+    "packages' maintainers) for:"
 )
+# The same after --fix's upgrades to official releases, which come first.
+FALLBACK_HEAD = "As a fallback, " + HEAD
+
+
+def head(upgrades: bool) -> str:
+    return FALLBACK_HEAD if upgrades else HEAD
 
 
 def pip_install(fill: Fill) -> str | None:
@@ -213,12 +219,13 @@ def pip_install(fill: Fill) -> str | None:
     return f"pip install --extra-index-url {INDEX} {fill.row.package.name}=={fill.row.package.version}"
 
 
-def explain_lines(fills: list[Fill], multi_py: bool) -> list[str]:
+def explain_lines(fills: list[Fill], multi_py: bool, fallback: bool = False) -> list[str]:
     """--explain --fix: the hint under a release's first filled target. `fills`: all of that release's, which come
-    from one input."""
+    from one input. `fallback`: an upgrade fixes one of those targets too, so the gap wheel is for when it can't."""
     on = ", ".join(dict.fromkeys(f.target.label(multi_py) for f in fills))
     how = pip_install(fills[0]) or "see the gap wheel section below for how to use it"
-    return [f"gap wheel for {on}: {UNOFFICIAL}", f"  {how}"]
+    first = "if you can't upgrade, " if fallback else ""
+    return [f"{first}gap wheel for {on}: {UNOFFICIAL}", f"  {how}"]
 
 
 def explain_json(fill: Fill) -> dict[str, str]:
@@ -444,13 +451,16 @@ def project_snippet_lines(fills: list[Fill], source: Source, multi_py: bool) -> 
     ]
 
 
-def text_lines(fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]] = frozenset()) -> list[str]:
+def text_lines(
+    fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]] = frozenset(), upgrades: bool = False
+) -> list[str]:
     """--fix's section of the text output (empty when nothing is fillable). `fallback`: the (id(row), target) cells an
-    upgrade fixes too (fix.alternatives), where the gap wheel is for when the package can't be upgraded."""
+    upgrade fixes too (fix.alternatives), where the gap wheel is for when the package can't be upgraded; `upgrades`:
+    whether --fix's section names an upgrade at all, which then comes first."""
     if not fills:
         return []
     listed, config, notes, pip = _parts(fills, multi_py, fallback=fallback)
-    out = ["", HEAD]
+    out = ["", head(upgrades)]
     out += [f"  {line}" for line in listed]
     if config:
         out += ["", "To install them with uv, add this to pyproject.toml, then run uv lock:", "", *config, ""]
@@ -485,13 +495,13 @@ def text_lines(fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int
 
 
 def markdown_lines(
-    fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]] = frozenset()
+    fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int, Target]] = frozenset(), upgrades: bool = False
 ) -> list[str]:
     """--fix's section of the Markdown report (empty when nothing is fillable); `fallback` as for text_lines."""
     if not fills:
         return []
     listed, config, notes, pip = _parts(fills, multi_py, _code, fallback)
-    out = ["#### Gap wheels", "", HEAD, ""]
+    out = ["#### Gap wheels", "", head(upgrades), ""]
     out += [f"- `{line}`" for line in listed]  # valid names and versions, and target labels: no backticks
     out.append("")
     if config:

@@ -392,7 +392,7 @@ puresdist 1.0 on linux-aarch64: ● source
 
 skipped 2 non-index packages: demo (editable), gitdep (git)
 3 of 5 packages have gaps: 3 will build from source.
-Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.
+Run with --fix for a way out: an upgrade where a newer release has the wheel, else wheelgap's gap wheel index.
 ```
 
 Source builds are acceptable here, so check that nothing fails to install:
@@ -420,7 +420,7 @@ It works with pip and uv. uv's default [first-index strategy](https://docs.astra
 **After 0.13.0**, `--fix` first looks for an upgrade: most gaps on a new Python are in packages whose latest release
 already has the wheel (PyYAML 6.0.3 has no CPython 3.15 wheel, 6.0.4 does). For each gap it names the nearest newer
 release with the wheel, the same one [`--suggest`](cli.md#suggest) would, and what to run for the input
-(`uv lock --upgrade-package pyyaml==6.0.4` for a uv.lock, the new pin for a requirements file); a gap wheel is only the
+(`uv lock --upgrade-package pyyaml` for a uv.lock, the new pin for a requirements file); a gap wheel is only the
 fallback for a package you can't upgrade, and a summary counts the gaps each way fixes:
 
 ```bash

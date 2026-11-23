@@ -223,7 +223,8 @@ def how(source: Source, cells: list[Cell], code: Callable[[str], str] = _plain) 
             f"{code(f'uv lock --script {source.uv_script} {options}')}."
         ]
     if kind == "uv":
-        where = code(str(source.uv_pyproject.parent)) if source.uv_pyproject is not None else "the project"
+        folder = str(source.uv_pyproject.parent) if source.uv_pyproject is not None else "."
+        where = "the project folder" if folder == "." else code(folder)
         return [f"In {where}, run {code(f'uv lock {options}')}, then {code('uv sync')}."]
     if kind in ("poetry", "pdm"):
         tool = "poetry" if kind == "poetry" else "pdm"
@@ -233,14 +234,14 @@ def how(source: Source, cells: list[Cell], code: Callable[[str], str] = _plain) 
             f"newest release they allow, so check that it's at least {', '.join(map(code, pins))} "
             "(widen the constraint if not), then run wheelgap again."
         ]
+    if kind == "requirements" and _hashed(cells):
+        return [
+            f"{label} pins hashes, so instead of editing the pins to {', '.join(map(code, pins))}, regenerate it: "
+            f"{code(f'pip-compile {options}')}, or {code(f'uv pip compile {options}')} with the options you made it "
+            "with."
+        ]
     if kind == "requirements":
-        out = [f"In {label}, change the pins to {', '.join(map(code, pins))}."]
-        if _hashed(cells):
-            out.append(
-                f"{label} pins hashes, so regenerate it instead of editing it: {code(f'pip-compile {options}')}, or "
-                f"{code(f'uv pip compile {options}')} with the options you made it with."
-            )
-        return out
+        return [f"In {label}, change the pins to {', '.join(map(code, pins))}."]
     if kind == "conda-env":
         return [f"In {label}'s {code('pip:')} list, change the pins to {', '.join(map(code, pins))}."]
     if kind == "script":

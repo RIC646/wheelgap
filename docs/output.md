@@ -387,15 +387,43 @@ or dropped lookup (a note on stderr says so). Like the other hints, it never cha
 code. Quiet text output can't show it (quiet can't be combined with `--explain`). With `--markdown --explain --suggest`,
 suggestions render as a list under the collapsed explanation details.
 
-## Gap wheels (--fix) {#fix}
+## Fixes and gap wheels (--fix) {#fix}
 
-`--fix` adds a section after the usual output when a wheel on wheelgap's
-[gap wheel index](https://wheelgap.github.io/wheels/) fills a gap: one line per package with the targets it fills (as
+**After 0.13.0**, `--fix` starts its section with a summary of the gap cells (a package on a target) and their way out:
+an upgrade to an official release first, an unofficial gap wheel second, else none. Only upgrades count as fixed. For a
+requirements file with `pyyaml==6.0.3`, `markupsafe==3.0.2` and `zstandard==0.25.0`, on `-p 3.15 -t
+linux-x86_64,win-amd64`:
+
+```text
+--fix: 6 gaps (a package on a target): 4 fixed by upgrading to an official release; 2 have only an unofficial gap wheel; 0 have no fix yet.
+
+Upgrade: a newer official release has the wheel:
+  markupsafe 3.0.2 -> 3.0.4: linux-x86_64, win-amd64
+  pyyaml 6.0.3 -> 6.0.4: linux-x86_64, win-amd64
+In requirements.txt, change the pins to markupsafe==3.0.4, pyyaml==6.0.4.
+wheelgap doesn't resolve dependencies: the rest of them must allow these releases.
+
+As a fallback, wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the packages' maintainers) for:
+  pyyaml 6.0.3: linux-x86_64 (if you can't upgrade pyyaml)
+  zstandard 0.25.0: linux-x86_64, win-amd64
+```
+
+followed by how to install the gap wheels, as below. Each upgrade line names the release and the targets it has wheels
+for, then a line says what to run or change for the input ([`--fix`](cli.md#fix) lists them per input); where wheelgap
+reads your own requirement for the package, the line ends with `(within your pyproject.toml constraint pyyaml>=6.0)` or
+`(needs requirements.txt's pyyaml<6.0.4,>=6 relaxed)`. A gap with neither goes under `No fix yet:`, one line per
+package with the reason per target and `ask for a wheel: URL` where wheelgap knows the package's issue tracker; on a
+free-threaded target whose release has only abi3 wheels, the line says so (`only abi3 wheels for linux-x86_64, which
+free-threaded Python can't use: ask NAME for a cp315t wheel at URL`). Packages whose releases weren't looked up get one
+line saying why: wheelgap can't tell they come from PyPI (their names stay private), the run uses another index, or the
+lookup failed.
+
+The gap wheel part lists one line per package with the targets it fills (as
 the table labels them), then how to install from the index. For a uv.lock input that's a snippet for
 `pyproject.toml`:
 
 ```text
-wheelgap's gap wheel index has wheels PyPI lacks for:
+As a fallback, wheelgap's gap wheel index has unofficial wheels PyPI lacks (built by wheelgap from PyPI's sdist, not by the packages' maintainers) for:
   tokenizers 0.23.3: win-arm64
 
 To install them with uv, add this to pyproject.toml, then run uv lock:
@@ -446,6 +474,18 @@ With `--json --fix`, the top-level `gap_wheels` list has one object per filled c
 target label), `wheel` (its filename), `url` (where to download it) and `sha256`. It's `[]` when nothing fits, when
 the run uses another index, or when the list couldn't be read, and absent without `--fix`. Like the other hints, it
 never changes a status, the summary or the exit code.
+
+With `--json --fix` (**after 0.13.0**), each package also gets `fix`: an object keyed by its gap target labels whose
+values have `kind` and that kind's keys:
+
+- `"upgrade"`: `version` (the release), `how` (what to run or change), `constraint` (`null`, or `file`,
+  `requirements` and `allows`: your own requirement and whether the release fits it) and `gap_wheel` (the fallback:
+  `null`, or `wheel`, `url`, `sha256` and `unofficial: true`);
+- `"gap_wheel"`: `wheel`, `url`, `sha256` and `unofficial: true`;
+- `"none"`: `reason` (`no_newer_release`, `loses_wheel`, `not_looked_up` or `no_binary`) and `abi3_only`.
+
+The top-level `fix_summary` counts them: `{"gaps": 6, "upgrade": 4, "gap_wheel": 2, "none": 0}`. `gap_wheels` still
+lists every cell a gap wheel fills, the fallback ones too.
 
 With `--json --explain --fix`, each package also gets `gap_wheel`: an object keyed by target label (only the targets a
 gap wheel fills, so `{}` when none does) whose values have `wheel`, `url` and `sha256`, and `install` (the pip command)

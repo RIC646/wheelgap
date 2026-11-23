@@ -1290,7 +1290,7 @@ def test_fix_leads_with_the_upgrade_and_keeps_the_exit_code(capsys, fake_pypi, g
         "  nowheels 0.9: win-arm64\n"
     )
     # The gap wheel stays installable for whoever can't upgrade: it's for the pinned version, so it never conflicts.
-    assert f"  fixme==1.0 --hash=sha256:{'ab' * 32}\n" in section
+    assert f"  add to the fixme==1.0 line:\n    --hash=sha256:{'ab' * 32}\n" in section
     assert section.endswith("How these wheels are built and checked: https://wheelgap.github.io/wheels/\n")
 
 
@@ -1373,7 +1373,9 @@ def test_fix_upgrade_for_hash_pinned_requirements_says_to_regenerate(capsys, fak
     reqs = _fixme_requirements(tmp_path, f"fixme==1.0 --hash=sha256:{'0' * 64}\n")
     _, out, _ = run(capsys, reqs, "-p", "3.14t", "-t", "win-arm64", "--fix")
     assert (
-        "requirements.txt pins hashes, so regenerate it instead of editing it: "
+        "Upgrade: a newer official release has the wheel:\n"
+        "  fixme 1.0 -> 1.3: win-arm64\n"
+        "requirements.txt pins hashes, so instead of editing the pins to fixme==1.3, regenerate it: "
         "pip-compile --upgrade-package fixme==1.3, or uv pip compile --upgrade-package fixme==1.3 with the options "
         "you made it with.\n"
     ) in out

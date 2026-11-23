@@ -350,9 +350,10 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--fix",
         action="store_true",
-        help="also say which gaps a wheel on wheelgap's gap wheel index fills, and how to install from it (reads "
-        "the index's list from wheelgap.github.io, which sends no package names, and keeps it in the 1-hour cache; "
-        "not with --offline, and off with --index-url or a WHEELGAP_INDEX_URL mirror)",
+        help="also say how to fix each gap: upgrade to the nearest newer release with the wheel (looks the PyPI "
+        "packages with gaps up on pypi.org, as --suggest does), else an unofficial wheel from wheelgap's gap wheel "
+        "index (reads its list from wheelgap.github.io, which sends no package names, and keeps it in the 1-hour "
+        "cache); not with --offline, and off with --index-url or a WHEELGAP_INDEX_URL mirror",
     )
     p.add_argument(
         "--print-gap-wheel-snippet",

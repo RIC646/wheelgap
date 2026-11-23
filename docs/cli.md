@@ -590,7 +590,34 @@ empty `FILE` is an error, as for `--junit`.
 
 ### `--fix` {#fix}
 
-**After 0.13.0.** Following the usual output, say which gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/)
+**After 0.13.0.** Following the usual output, say how to fix each gap cell (a package on a target, `source` or
+`missing`, not `--ignore`d), in order of preference (**after 0.13.0**; 0.13.0 lists gap wheels only):
+
+1. **Upgrade** to an official release: the nearest newer release with a wheel for that target, as
+   [`--suggest`](#suggest) names it (not yanked, `Requires-Python` admitting the target's Python, no pre-release unless
+   the pin is one, and keeping a wheel on every target the package has one on now), with what to run or change for the
+   input: `uv lock --upgrade-package NAME==VERSION` for a uv.lock (`uv lock --script SCRIPT --upgrade-package ...` for a
+   script's lock), the new pins for a requirements file (for one that pins hashes, `pip-compile --upgrade-package
+   NAME==VERSION` or `uv pip compile --upgrade-package NAME==VERSION` to regenerate it), `poetry update NAME` or
+   `pdm update NAME` for those locks (they stay within `pyproject.toml`'s constraints, so check the release they pick),
+   and "upgrade NAME to VERSION" for the other lockfiles. Where wheelgap reads your own requirement for the package (a
+   uv.lock project's dependencies, dependency groups and `[manifest]` constraints, or a ranged requirement in a
+   requirements file, `pyproject.toml`, script or the command line), it says whether the release is within it or the
+   requirement needs relaxing; otherwise it says nothing. wheelgap doesn't resolve, so the rest of the dependencies must
+   allow the release.
+2. **Gap wheel**: when no newer release has the wheel, an unofficial wheel of the pinned version from wheelgap's gap
+   wheel index, as below. When both exist, the upgrade comes first and the gap wheel is listed as the fallback
+   ("if you can't upgrade NAME").
+3. **No fix yet**, with the reason (no newer release has a wheel, every one that has drops a wheel elsewhere, the
+   releases weren't looked up, or `--no-binary`), the package's issue tracker where wheelgap has it, and, on a
+   free-threaded target whose release has only abi3 wheels, a line saying so.
+
+A summary at the top counts them; only upgrades count as fixed. The releases are looked up on pypi.org, one request per
+package, as for `--suggest` (and once for both when you pass both), only for packages that pass
+[the PyPI-origin rule](how-it-works.md#pypi-origin); for the others, and with another index, a line says they weren't
+looked up and why.
+
+For the gap wheels, it says which gaps a wheel on wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/)
 fills, and how to install from it: a `[tool.uv.index]` and `[tool.uv.sources]` snippet for `pyproject.toml` with a
 uv.lock input, the same entries for the `# /// script` block of a script (or of the script beside a script's lock,
 `example.py.lock`, then `uv lock --script example.py`), and an `--extra-index-url` line for pip otherwise. A cell counts only when it's `source` or `missing`
@@ -604,7 +631,8 @@ empty-fill note always names the UTC time the list was fetched. It never
 changes a status, the summary or the exit code: wheelgap still reports what PyPI has. `--offline` refuses the flag
 with an error; with `--index-url`, `index-url` in `[tool.wheelgap]` or a `WHEELGAP_INDEX_URL` mirror it's off and
 reads nothing. If the list can't be read, a note on stderr says so. With `--json` it adds
-[`gap_wheels`](output.md#fix). There's no config key for it.
+[`gap_wheels`](output.md#fix), and (**after 0.13.0**) each package's `fix` and the top-level `fix_summary`. There's no
+config key for it.
 See [Installing from the gap wheel index](recipes.md#installing-from-the-gap-wheel-index).
 
 With `--explain` too (**after 0.13.0**), each package a gap wheel fills gets a `gap wheel` line under its first filled

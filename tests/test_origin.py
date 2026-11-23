@@ -48,6 +48,7 @@ def package(tmp_path, files, name="nowheels"):
         ({"nowheels==0.9": ""}, True),  # a name on the command line, found on pypi.org
         ({"requirements.txt": "nowheels==0.9\n"}, True),
         ({"requirements.txt": "--index-url https://pypi.corp.example/simple\nnowheels==0.9\n"}, False),
+        ({"requirements.txt": "--pypi-url https://pypi.corp.example/simple\nnowheels==0.9\n"}, False),  # -i too
         ({"requirements.txt": "nowheels==0.9\n", "uv.toml": "index-url = 'https://x.example/simple'\n"}, False),
         ({"pyproject.toml": PYPROJECT}, True),
         ({"pyproject.toml": PYPROJECT + "\n[[tool.uv.index]]\nurl = 'https://pypi.corp.example/simple'\n"}, False),

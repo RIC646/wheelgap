@@ -595,6 +595,19 @@ def test_check_lockfile_dependencies_refuses_lockfiles_and_offline(tmp_path, fix
     assert "call without dependencies: true" in offline["result"]["content"][0]["text"]
 
 
+def test_check_lockfile_notes_an_index_option_in_requirements(fake_pypi, tmp_path):
+    # #632: the CLI's note reaches the MCP client in notes, by the option's name and never its value.
+    path = tmp_path / "requirements.txt"
+    path.write_text("--extra-index-url https://user:secret@example.invalid/whl/cpu\npurewheel==3.1\n", encoding="utf-8")
+    (_, reply) = run(init(), call("check_lockfile", path=str(path), python="3.13", targets=["linux-x86_64"]))
+    data = reply["result"]["structuredContent"]
+    assert (
+        "requirements.txt sets --extra-index-url, which wheelgap doesn't read: its packages were checked on PyPI "
+        "only, so a package pip finds elsewhere may install differently"
+    ) in data["notes"]
+    assert "secret" not in json.dumps(reply)
+
+
 def test_check_lockfile_lists_skipped_packages(fake_pypi, fixtures):
     (_, reply) = run(
         init(), call("check_lockfile", path=str(fixtures / "uvproj"), python="3.13", targets=["linux-x86_64"])

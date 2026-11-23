@@ -460,7 +460,13 @@ the link points into (after 0.13.0).
 
 **Skipped:** editable lines (`-e`), local paths (lines starting with `.` or `/`) and URLs (`git+https://…`,
 `name @ https://…`). Other pip options in the file, such as `--index-url`, are ignored: use wheelgap's
-own [`--index-url`](cli.md#index-url) to look packages up on another index.
+own [`--index-url`](cli.md#index-url) to look packages up on another index. An index option on a line of its own
+(`-i` / `--index-url` / `--pypi-url`, `--extra-index-url`, `-f` / `--find-links` or `--no-index`, in the file or one
+it includes) changes where pip looks, so wheelgap's answer is PyPI's alone, and (after 0.13.0) it says so on stderr,
+once per input, naming the option but never its value: `wheelgap: note: requirements.txt sets --extra-index-url,
+which wheelgap doesn't read: its packages were checked on PyPI only, so a package pip finds elsewhere may install
+differently`. `-q` drops the note, and a run with `--index-url` or a `WHEELGAP_INDEX_URL` mirror doesn't print it,
+since that run doesn't check PyPI.
 
 **`--deps`:** with [`--deps`](cli.md#deps) a requirements file is resolved instead — every requirement line is a
 root, and the whole tree it installs is checked per target. Constraint files and `--no-binary` / `--only-binary`
@@ -485,7 +491,7 @@ wheelgap environment.yml -p 3.12 -t linux-aarch64,win-arm64
 
 **Read:** each item in a `pip:` list is read as a [requirements file](#requirements-files) line, so pins, ranges,
 markers, `-r` / `-c` includes, `--no-binary` / `--only-binary` and `--deps` work the same way. An `--index-url` or
-`--extra-index-url` entry in `pip:` marks the file as not PyPI-only, just as in a requirements file.
+`--extra-index-url` entry in `pip:` marks the file as not PyPI-only, and gets the same note, just as in a requirements file.
 
 **Skipped:** conda dependencies (such as `python=3.12`, `numpy`, `pip`) are listed as skipped (`conda`), and editable,
 path and URL lines under `pip:` are skipped as in a requirements file. When the `pip:` list is empty (or absent),

@@ -1785,6 +1785,21 @@ def note_prefer_binary(sources: list[Source]) -> None:
             )
 
 
+def note_index_options(sources: list[Source]) -> None:
+    """One note per requirements file that sets an index option pip reads and wheelgap doesn't (Source.index_options):
+    by the option's name only, since its value may hold credentials."""
+    for source in sources:
+        if not source.index_options:
+            continue
+        options = source.index_options
+        named = options[0] if len(options) == 1 else f"{', '.join(options[:-1])} and {options[-1]}"
+        print(
+            f"wheelgap: note: {source.label} sets {named}, which wheelgap doesn't read: its packages were checked on "
+            "PyPI only, so a package pip finds elsewhere may install differently",
+            file=sys.stderr,
+        )
+
+
 def _names(names: list[str]) -> str:
     return ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
 
@@ -2762,6 +2777,8 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not quiet:
         note_unpinned_requirements(sources)
         note_prefer_binary(sources)
+        if origin.other_index(index_url) is None:  # with --index-url or a mirror, the run doesn't check PyPI only
+            note_index_options(sources)
         for source in sources:
             if source.poetry_extras_unsure is not None:
                 print(f"wheelgap: note: {source.label}: {source.poetry_extras_unsure}", file=sys.stderr)

@@ -568,6 +568,90 @@ def test_requirements_deps_refuses_pre_and_prefer_binary(capsys, fake_pypi, tmp_
     ) in err
 
 
+_INDEX_NOTE = (
+    "wheelgap: note: requirements.txt sets {}, which wheelgap doesn't read: its packages were checked on PyPI only, "
+    "so a package pip finds elsewhere may install differently\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("lines", "named"),
+    [
+        # PyTorch's install instructions: pip 26.3 installs torch-2.9.0+cpu for win_arm64 from the other index.
+        (["--extra-index-url https://user:secret@example.invalid/whl/cpu"], "--extra-index-url"),
+        (["-i https://user:secret@example.invalid/simple"], "--index-url"),
+        (["-ihttps://user:secret@example.invalid/simple"], "--index-url"),
+        (["--index-url=https://user:secret@example.invalid/simple"], "--index-url"),
+        (["--extra https://user:secret@example.invalid/simple"], "--extra-index-url"),  # optparse's abbreviation
+        (["--find-links ./wheels"], "--find-links"),
+        (["-f https://user:secret@example.invalid/wheels.html"], "--find-links"),
+        (["--no-index", "--find-links=./wheels"], "--no-index and --find-links"),
+        (
+            ["-i https://user:secret@example.invalid/a", "--extra-index-url https://example.invalid/b", "-f ./w"],
+            "--index-url, --extra-index-url and --find-links",
+        ),
+        (
+            ["--extra-index-url https://example.invalid/a", "--extra-index-url https://example.invalid/b"],
+            "--extra-index-url",
+        ),
+        (["--pre --extra-index-url https://user:secret@example.invalid/simple"], "--extra-index-url"),
+        (["--pypi-url https://user:secret@example.invalid/simple"], "--pypi-url"),  # pip's other name for -i
+    ],
+)
+def test_requirements_index_option_is_a_note(capsys, fake_pypi, tmp_path, lines, named):
+    # pip reads these lines and installs from the index or folder they name; wheelgap checks PyPI only (#632). The
+    # report is unchanged, and stderr says so, by the option's name only: its value may hold credentials.
+    req = tmp_path / "requirements.txt"
+    req.write_text("\n".join([*lines, "purewheel==3.1", ""]), encoding="utf-8")
+    code, out, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "--json")
+    assert code == 0 and json.loads(out)["packages"][0]["results"]["linux-x86_64"] == "wheel"
+    assert err.count(_INDEX_NOTE.format(named)) == 1
+    assert "secret" not in err and "example.invalid" not in err and "./w" not in err
+    code, _, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "-q")
+    assert code == 0 and "doesn't read" not in err  # -q drops it, as it drops the unpinned-package note
+
+
+def test_requirements_index_option_in_an_included_file_is_a_note(capsys, fake_pypi, tmp_path):
+    (tmp_path / "base.txt").write_text("--find-links https://user:secret@example.invalid/w.html\npurewheel==3.1\n")
+    req = tmp_path / "requirements.txt"
+    req.write_text("-r base.txt\nfastlib==2.0.0\n", encoding="utf-8")
+    code, _, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 0 and err.count(_INDEX_NOTE.format("--find-links")) == 1  # one note per input, named by its label
+    assert "secret" not in err
+
+
+def test_requirements_without_index_option_has_no_index_note(capsys, fake_pypi, tmp_path):
+    req = tmp_path / "requirements.txt"
+    # --trusted-host names no index, nor does its value; an -f after a requirement is ignored by pip (its own note
+    # says so), and so is an index option on a line with -r or -c: pip 26.3 reads the file and drops the rest.
+    (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("", encoding="utf-8")
+    req.write_text(
+        "--trusted-host -ifoo\n--find-links ./w -r base.txt\n-c c.txt --extra-index-url https://example.invalid/s\n"
+        "fastlib==2.0.0 -f ./w\n",
+        encoding="utf-8",
+    )
+    code, _, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 0 and "doesn't read" not in err
+    assert "requirements.txt:4: pip ignores -f after a requirement" in err
+
+
+def test_requirements_index_note_not_given_when_the_run_names_an_index(
+    capsys, fake_pypi, fake_simple, tmp_path, monkeypatch
+):
+    # With wheelgap's own --index-url (or a WHEELGAP_INDEX_URL mirror) the run doesn't check PyPI, so the note,
+    # which says it does, would be wrong.
+    req = tmp_path / "requirements.txt"
+    req.write_text("--extra-index-url https://example.invalid/simple\npurewheel==3.1\n", encoding="utf-8")
+    code, _, err = run(
+        capsys, str(req), "-p", "3.13", "-t", "linux-x86_64", "--index-url", "https://simple.example/simple"
+    )
+    assert code in (0, 1) and "doesn't read" not in err
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://mirror.example.com/pypi")
+    code, _, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 0 and "doesn't read" not in err
+
+
 def test_requirements_include_cycle_exits_2(capsys, tmp_path, monkeypatch):
     # pip refuses an include cycle, so wheelgap does too: exit code 2, and the same error with
     # --github-annotations, since the file is parsed before any line is looked up (#603).

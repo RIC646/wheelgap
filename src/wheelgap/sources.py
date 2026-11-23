@@ -256,6 +256,10 @@ class Source:
     # The input names no index but PyPI, so a package this run found on pypi.org is a PyPI package (for --conda-forge,
     # which sends only such names). False when unsure: lockfiles rely on each package's registry instead.
     pypi_only: bool = False
+    # A requirements file's index options on lines of their own (`--extra-index-url URL`, in it or a file it
+    # includes), by their full names and never with their values, which may hold credentials: pip reads them and
+    # wheelgap doesn't, so the CLI says the file was checked on PyPI only.
+    index_options: list[str] = field(default_factory=list)
     # A project directory with pixi.lock as well as the lockfile that was picked: the pixi.lock, for a note.
     passed_over: Path | None = None
     # The input was a directory: which of its files this is and why (None for a file or package names).
@@ -1949,7 +1953,8 @@ _VIA_COMMENT_RE = re.compile(r"^#\s*via\b")
 
 
 # pip options that point at an index or a folder of distributions other than PyPI's (or turn PyPI off).
-_INDEX_OPTIONS = ("--index-url", "--extra-index-url", "--find-links", "--no-index")
+# --pypi-url is pip's other name for --index-url.
+_INDEX_OPTIONS = ("--index-url", "--pypi-url", "--extra-index-url", "--find-links", "--no-index")
 
 
 def _names_index_option(line: str) -> bool:
@@ -1963,6 +1968,55 @@ def _names_index_option(line: str) -> bool:
         if len(option) > 2 and option.startswith("--") and any(name.startswith(option) for name in _INDEX_OPTIONS):
             return True
     return False
+
+
+def _index_option_names(lines: Iterable[str]) -> list[str]:
+    """The index options pip reads on these lines of options, by their long names (`-i URL` is `--index-url`, the
+    abbreviation `--extra URL` is `--extra-index-url`), in order and once each. Tokens are read as pip's optparse reads
+    them (_REQUIREMENT_LINE_OPTIONS), so a value (`--trusted-host -ifoo`) and an ambiguous abbreviation (`--no`, which
+    pip refuses) name none. A requirement line is passed over: pip ignores an index option after a requirement, and
+    _requirement_options notes that. So is a line with -r or -c: pip reads the file it names and never applies the
+    line's other options (`_parse_and_recurse` doesn't hand the line to `handle_option_line`), so pip 26.3 doesn't
+    look in `--find-links wheels -r base.txt`'s folder."""
+    names: dict[str, None] = {}
+    for line in lines:
+        if not line.startswith("-"):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+        found: list[str] = []
+        include = False
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            i += 1
+            if token == "--":
+                break
+            if token.startswith("--"):
+                option, eq, _ = token.partition("=")
+                matches = (
+                    [option]
+                    if option in _LONG_LINE_OPTIONS
+                    else [n for n in _LONG_LINE_OPTIONS if n.startswith(option)]
+                )
+                if len(matches) != 1:
+                    continue
+                name, entry, attached = matches[0], _LONG_LINE_OPTIONS[matches[0]], bool(eq)
+            elif token.startswith("-") and token[:2] in _SHORT_LINE_OPTIONS:
+                entry = _SHORT_LINE_OPTIONS[token[:2]]
+                name, attached = entry[0][1], len(token) > 2  # `-fURL` holds its value
+            else:
+                continue
+            include = include or name in ("--requirement", "--constraint")
+            if name in _INDEX_OPTIONS:
+                found.append(name)
+            if entry[1] and not attached:  # `-i URL`, `--extra-index-url URL`: the next token is the value
+                i += 1
+        if not include:
+            names.update(dict.fromkeys(found))
+    return list(names)
 
 
 def _abbreviated_include(line: str) -> bool:
@@ -2465,6 +2519,7 @@ def _finalize_requirements(
         pkgs,
         requirements=True,
         pypi_only=not index_options and not _nearby_config_names_an_index(path),
+        index_options=_index_option_names(index_options),
         specs=req_lines,
         compiled="hash" in compiler_signs,  # hash mode makes pip refuse anything unpinned: the file is complete
         constraint_specs=constraint_specs,

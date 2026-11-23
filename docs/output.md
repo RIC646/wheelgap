@@ -641,7 +641,7 @@ another SARIF viewer), alongside whatever output mode you use. It has two rules,
   outside the repository, has no location: its gap still fails the job, but code scanning doesn't show it.
 - **After 0.13.0**, with `--dockerfile`, a note that the final image wasn't read ([`dockerfile_notes`](#json) of kind
   `image-not-read` or `image-libc`) is a `note` result of a third rule, `wheelgap/dockerfile-note`, at the `FROM`
-  line. The rule is listed only in a run that has such a result. A line `--dockerfile-inputs` couldn't see into
+  line (for a heredoc an old `# syntax=` line may read differently, at that instruction's line). The rule is listed only in a run that has such a result. A line `--dockerfile-inputs` couldn't see into
   ([`dockerfile_warnings`](#json)) is a `warning` result of `wheelgap/dockerfile-unseen` at that line.
 - `partialFingerprints` key a result by file, package and target, not version, so code scanning keeps one alert open
   across lockfile bumps until the gap goes away. A package that one file locks at several versions gets an alert per

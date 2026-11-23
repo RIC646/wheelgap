@@ -49,6 +49,7 @@ from .deps import Resolver, pinned_complete, resolve_deps
 from .dockerfile import (
     PASSED_OVER,
     DockerfileError,
+    HeredocSyntaxError,
     ImageTarget,
     InputsReport,
     UnknownImageError,
@@ -2234,6 +2235,13 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         nonlocal image, unknown_image
         try:
             image = read_dockerfile(Path(args.dockerfile), build_args)
+        except HeredocSyntaxError as e:
+            if args.dockerfile_inputs:
+                # -p and -t don't help --dockerfile-inputs here: say what does, with the line.
+                raise DockerfileError(f"{args.dockerfile}:{e.line}: {e.for_inputs()}") from None
+            if not (args.python and args.target):
+                raise
+            unknown_image = e
         except UnknownImageError as e:
             if not (args.python and args.target):
                 raise
@@ -2298,7 +2306,12 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 # -p and -t are both given, so nothing is taken from the image. What that leaves unknown is said
                 # every time, --quiet or not: the answer is for the targets given, not for an image wheelgap read.
                 libc = "" if args.glibc or args.musl else " (pass --glibc or --musl if it isn't wheelgap's default)"
-                reason = str(unknown_image).removeprefix(f"{args.dockerfile}: ").removesuffix(", pass -p/-t instead")
+                if isinstance(unknown_image, HeredocSyntaxError):
+                    reason = unknown_image.reason
+                else:
+                    reason = (
+                        str(unknown_image).removeprefix(f"{args.dockerfile}: ").removesuffix(", pass -p/-t instead")
+                    )
                 message = (
                     f"the final image isn't read ({reason}), so this run checks the -p and -t given. Not known from "
                     "the Dockerfile: which Python the image's pip installs for and which pip version it has, its "

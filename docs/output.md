@@ -416,11 +416,11 @@ How these wheels are built and checked: https://wheelgap.github.io/wheels/
 
 A requirements file, a `pyproject.toml`, a pip report or package names get the
 `--extra-index-url https://wheelgap.github.io/wheels/simple/` line for a requirements file or `pip install`, for
-requirements that pin hashes one line per package with its gap wheels' `--hash` options, to add to that package's
-existing line (keeping the hashes it has: on a second line for the same package, pip won't use them), and a reminder
-that pip treats every index alike. Other lockfiles
-(`pylock.toml`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`, `pixi.lock`) pin each file, so they get a line saying to add
-the index where the lockfile is made and lock again. A script gets the `[[tool.uv.index]]` and `[tool.uv.sources]`
+requirements that pin hashes each package's gap wheel `--hash` options under an `add to the NAME==VERSION line:` label,
+to add to that package's existing line (keeping the hashes it has: on a second line for the same package, pip won't
+use them), and a reminder that pip treats every index alike. Other lockfiles (`pylock.toml`, `poetry.lock`,
+`pdm.lock`, `Pipfile.lock`, `pixi.lock`) pin each file, so they get a line saying to add the index where the lockfile
+is made and lock again. A script gets the `[[tool.uv.index]]` and `[tool.uv.sources]`
 lines to add inside its `# /// script` block for `uv run`, commented as the block's lines are, with a note for each
 package that isn't one of the block's own `dependencies` (uv applies sources only to those). Packages wheelgap can't place on PyPI aren't checked, and a note
 on stderr names them. `--markdown` renders the same section with fenced code blocks, and `-q` keeps it. With nothing to fill, a
@@ -643,7 +643,7 @@ another SARIF viewer), alongside whatever output mode you use. It has two rules,
   outside the repository, has no location: its gap still fails the job, but code scanning doesn't show it.
 - **After 0.13.0**, with `--dockerfile`, a note that the final image wasn't read ([`dockerfile_notes`](#json) of kind
   `image-not-read` or `image-libc`) is a `note` result of a third rule, `wheelgap/dockerfile-note`, at the `FROM`
-  line. The rule is listed only in a run that has such a result. A line `--dockerfile-inputs` couldn't see into
+  line (for a heredoc an old `# syntax=` line may read differently, at that instruction's line). The rule is listed only in a run that has such a result. A line `--dockerfile-inputs` couldn't see into
   ([`dockerfile_warnings`](#json)) is a `warning` result of `wheelgap/dockerfile-unseen` at that line.
 - `partialFingerprints` key a result by file, package and target, not version, so code scanning keeps one alert open
   across lockfile bumps until the gap goes away. A package that one file locks at several versions gets an alert per

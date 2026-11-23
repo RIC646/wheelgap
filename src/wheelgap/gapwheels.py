@@ -393,7 +393,7 @@ def _hashes(fills: list[Fill]) -> list[tuple[str, str]]:
 
 
 HASHES_HOW = (
-    "If the requirements pin hashes, add these hashes to each package's existing line, keeping the ones it has "
+    "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
     "(on a second line for the same package, pip won't use them):"
 )
 
@@ -437,8 +437,8 @@ def project_snippet_lines(fills: list[Fill], source: Source, multi_py: bool) -> 
         f"# {PIP_CAVEAT}",
         f"--extra-index-url {INDEX}",
         *(
-            f"# If the requirements pin hashes, add {opts} to the existing {req} line, keeping the hashes it has "
-            "(not as a line of its own, which pip won't use)."
+            f"# If the requirements pin hashes, add these to the existing {req} line, keeping the hashes it has "
+            f"(not as a line of their own, which pip won't use): {opts}"
             for req, opts in _hashes(fills)
         ),
     ]
@@ -464,7 +464,7 @@ def text_lines(fills: list[Fill], multi_py: bool, fallback: Collection[tuple[int
             "or pass it to pip install:",
             f"  pip install --extra-index-url {INDEX} ...",
             HASHES_HOW,
-            *(f"  {req} {opts}" for req, opts in _hashes(fills)),
+            *(line for req, opts in _hashes(fills) for line in (f"  add to the {req} line:", f"    {opts}")),
             PIP_CAVEAT,
         ]
     for label, lines, script_notes, relock in _script_parts(fills):
@@ -514,9 +514,7 @@ def markdown_lines(
             "",
             HASHES_HOW,
             "",
-            "```",
-            *(f"{req} {opts}" for req, opts in _hashes(fills)),
-            "```",
+            *(f"- add to the `{req}` line: `{opts}`" for req, opts in _hashes(fills)),
             "",
             PIP_CAVEAT,
             "",

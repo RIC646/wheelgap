@@ -671,6 +671,19 @@ def test_check_lockfile_offline_false_overrides_config(fake_pypi, tmp_path):
     assert fake_pypi
 
 
+def test_check_dockerfile_old_syntax_heredoc_error_names_the_line(fake_pypi, tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "# syntax=docker/dockerfile:1.4\nFROM python:3.13-slim\nRUN cat > /etc/x << EOF\nhi\nEOF\n", encoding="utf-8"
+    )
+    (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile), path=str(tmp_path)))
+    assert reply["result"]["isError"] is True
+    message = reply["result"]["content"][0]["text"]
+    assert message.startswith(f"{dockerfile}:3: # syntax=docker/dockerfile:1.4 may read the heredocs in ")
+    assert "-p/-t" not in message  # the command line's advice is translated
+    assert not fake_pypi
+
+
 @pytest.mark.parametrize("inputs", [False, True])
 def test_check_dockerfile_offline_error_gives_project_setting(fake_pypi, tmp_path, inputs):
     requirements = tmp_path / "requirements.txt"

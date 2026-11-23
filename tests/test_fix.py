@@ -74,9 +74,10 @@ def test_pip_way_for_package_names_and_the_same_exit_code(capsys, fake_pypi, gap
         f"  --extra-index-url {INDEX}\n"
         "or pass it to pip install:\n"
         f"  pip install --extra-index-url {INDEX} ...\n"
-        "If the requirements pin hashes, add these hashes to each package's existing line, keeping the ones it has "
+        "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
         "(on a second line for the same package, pip won't use them):\n"
-        f"  nowheels==0.9 --hash=sha256:{'ab' * 32}\n"
+        "  add to the nowheels==0.9 line:\n"
+        f"    --hash=sha256:{'ab' * 32}\n"
         f"{gapwheels.PIP_CAVEAT}\n"
         "\n"
         "How these wheels are built and checked: https://wheelgap.github.io/wheels/\n"
@@ -110,14 +111,15 @@ def test_hashes_of_a_package_on_two_targets_go_on_its_one_line(capsys, fake_pypi
     code, out, _ = run(capsys, str(reqs), *TWO_TARGETS)
     assert code == 1
     assert out.endswith(
-        "If the requirements pin hashes, add these hashes to each package's existing line, keeping the ones it has "
+        "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
         "(on a second line for the same package, pip won't use them):\n"
-        f"  nowheels==0.9 {HASHES}\n"
+        "  add to the nowheels==0.9 line:\n"
+        f"    {HASHES}\n"
         f"{gapwheels.PIP_CAVEAT}\n"
         "\n"
         "How these wheels are built and checked: https://wheelgap.github.io/wheels/\n"
     )
-    assert out.count("nowheels==0.9 --hash") == 1
+    assert out.count("--hash=") == 2 and "nowheels==0.9 --hash" not in out  # no line pip would take as a requirement
 
 
 def test_hashes_of_a_package_on_two_targets_in_markdown(capsys, fake_pypi, gap_wheels):
@@ -125,14 +127,13 @@ def test_hashes_of_a_package_on_two_targets_in_markdown(capsys, fake_pypi, gap_w
     code, out, _ = run(capsys, "nowheels==0.9", *TWO_TARGETS, "--markdown")
     assert code == 1
     assert (
-        "If the requirements pin hashes, add these hashes to each package's existing line, keeping the ones it has "
+        "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
         "(on a second line for the same package, pip won't use them):\n"
         "\n"
-        "```\n"
-        f"nowheels==0.9 {HASHES}\n"
-        "```\n"
+        f"- add to the `nowheels==0.9` line: `{HASHES}`\n"
+        "\n"
     ) in out
-    assert out.count("nowheels==0.9 --hash") == 1
+    assert out.count("--hash=") == 2 and "nowheels==0.9 --hash" not in out
 
 
 def test_hashes_of_a_package_on_two_targets_in_the_snippet(capsys, fake_pypi, gap_wheels, tmp_path):
@@ -143,8 +144,8 @@ def test_hashes_of_a_package_on_two_targets_in_the_snippet(capsys, fake_pypi, ga
     assert code == 1
     assert out.endswith(
         f"--extra-index-url {INDEX}\n"
-        f"# If the requirements pin hashes, add {HASHES} to the existing nowheels==0.9 line, keeping the hashes it "
-        "has (not as a line of its own, which pip won't use).\n"
+        "# If the requirements pin hashes, add these to the existing nowheels==0.9 line, keeping the hashes it has "
+        f"(not as a line of their own, which pip won't use): {HASHES}\n"
     )
 
 
@@ -644,7 +645,7 @@ def test_dev_group_package_is_listed_where_its_parent_is_not_in_project_dependen
 def test_the_same_target_from_two_inputs_is_listed_once():
     lines = gapwheels.text_lines([_fill("requirements", "a.txt"), _fill("requirements", "b.txt")], False)
     assert "  x 1: win-arm64" in lines
-    assert sum(line.startswith("  x==1 --hash=") for line in lines) == 1
+    assert lines.count("  add to the x==1 line:") == 1 and sum("--hash=" in line for line in lines) == 1
 
 
 def test_no_binary_package_isnt_blamed_on_its_origin(capsys, fake_pypi, gap_wheels, tmp_path):
@@ -1015,8 +1016,8 @@ def test_print_gap_wheel_snippet_for_a_requirements_file(capsys, fake_pypi, gap_
         "# fills: nowheels 0.9: win-arm64\n"
         f"# {gapwheels.PIP_CAVEAT}\n"
         f"--extra-index-url {INDEX}\n"
-        f"# If the requirements pin hashes, add --hash=sha256:{'ab' * 32} to the existing nowheels==0.9 line, keeping "
-        "the hashes it has (not as a line of its own, which pip won't use).\n"
+        "# If the requirements pin hashes, add these to the existing nowheels==0.9 line, keeping the hashes it has "
+        f"(not as a line of their own, which pip won't use): --hash=sha256:{'ab' * 32}\n"
     )
     assert requirements.read_text(encoding="utf-8") == "nowheels==0.9\n"
     assert list(tmp_path.iterdir()) == [requirements]

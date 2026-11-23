@@ -427,8 +427,9 @@ wheelgap uv.lock -p 3.14t -t win-arm64 --fix
 A gap counts only when it's `source` or `missing`, the package is [positively PyPI's](how-it-works.md#pypi-origin), and
 the index has a wheel of exactly that version that the target accepts. The exit code doesn't change: wheelgap still
 reports what PyPI has. For a requirements file or package names it prints the `--extra-index-url` line (and, for
-requirements that pin hashes, each package's gap wheel `--hash` options to add to its existing line); for a uv.lock it prints a `pyproject.toml` snippet that adds the
-index with `explicit = true` and points each package at it in `[tool.uv.sources]`. uv applies `[tool.uv.sources]` only
+requirements that pin hashes, each package's gap wheel `--hash` options to add to its existing line); for a uv.lock
+it prints a `pyproject.toml` snippet that adds the index with `explicit = true` and points each package at it in
+`[tool.uv.sources]`. uv applies `[tool.uv.sources]` only
 to direct dependencies: for a package that comes in through another one, `--fix` also says to list it where that one is
 (the same dependencies, dependency group or extra), and when the lock can't show whether a package is direct, it says
 to list it to be safe. Other lockfiles get a line saying to add the index where the lockfile is made. Only follow the
@@ -473,8 +474,9 @@ Put the setting in the project's `requirements.txt`, so it applies to that proje
 ```
 
 If the file pins hashes (`--require-hashes`, or `--hash` options from `pip-compile --generate-hashes` or
-`uv pip compile --generate-hashes`), pip installs only files whose hash is listed, so add each gap wheel's hash, which
-`--fix` prints, to the package's existing line, next to the hashes it has:
+`uv pip compile --generate-hashes`), pip installs only files whose hash is listed. `--fix` prints each package's gap
+wheel hashes under an `add to the lz4==4.4.5 line:` label. Add them to that requirement's own `\`-continued block,
+keeping the hashes it has: put each right after the `lz4==4.4.5 \` line, ending it with ` \`:
 
 ```text
 lz4==4.4.5 \
@@ -483,5 +485,7 @@ lz4==4.4.5 \
     ...
 ```
 
-Don't add a second `lz4==4.4.5 --hash=…` line instead. pip allows only the hashes every line for a package shares, so
-it won't use the gap wheel: it builds the sdist, or fails with `THESE PACKAGES DO NOT MATCH THE HASHES`.
+A hash outside the block doesn't count. pip ignores one on a line of its own after the block, with only a warning
+(`has --hash but no requirement, and will be ignored`). A second `lz4==4.4.5 --hash=…` line doesn't work either: pip
+allows only the hashes every line for a package shares. Either way it won't use the gap wheel: it builds the sdist,
+or fails with `THESE PACKAGES DO NOT MATCH THE HASHES`.

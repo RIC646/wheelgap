@@ -22,7 +22,7 @@ For the known cases where wheelgap's answer can differ from pip's and uv's, see
 Version ranges such as `numpy>=1.26,<2` use the newest matching release with a non-yanked file whose
 `Requires-Python` permits the selected Python. With several `-p` versions, each Python major/minor selects its own
 release from one index response. Regular and free-threaded builds of the same Python share release selection, but
-each still checks its own wheel tags. Missing or invalid `Requires-Python` metadata is treated as unrestricted.
+each still checks its own wheel tags. Missing or invalid `Requires-Python` metadata is treated as unrestricted. A pre-release counts only when the range names one or nothing else matches, as in pip, unless a requirements file sets `--pre`, `--all-releases` or `--only-final` (after 0.13.0; see [requirements files](inputs.md#requirements-files)).
 Exact pins (`name==1.2.3`) skip files whose `Requires-Python` excludes the selected Python, as pip does, and resolve
 per Python the same way. Bare package names keep their existing behavior. This applies to both the PyPI JSON API and
 `--index-url` simple indexes. A `uv.lock` is the exception: it's answered the way `uv sync` installs it, and uv
@@ -151,18 +151,19 @@ only when wheelgap knows the package is PyPI's. That's one rule, shared by them 
 - **And either** its lock records its index as exactly `https://pypi.org/simple` (a `uv.lock` registry or a
   `pylock.toml` index; a `poetry.lock` legacy source or a `pixi.lock` index with that exact URL counts too, except for
   `--notes`), **or** this run looked it up and found it on pypi.org, and nothing points pip or uv at another index:
-    - **The input names no other index.** That's package names, a requirements file with no `-i`/`--index-url`,
-      `--extra-index-url`, `-f`/`--find-links` or `--no-index` option (in any form pip reads, in it or in the files it
-      pulls in with `-r` and `-c`), a `pyproject.toml` with no index or sources in `[tool.uv]`, `[tool.uv.pip]`,
-      `[tool.poetry]`, `[tool.pdm]` or `[tool.pixi.pypi-options]`, a script whose `# /// script` block has none in
-      its `[tool.uv]`, or a `Pipfile.lock` whose sources are all PyPI. A
+    - **The input names no other index.** That's package names, a requirements file with no `-i`/`--index-url`
+      (or `--pypi-url`), `--extra-index-url`, `-f`/`--find-links` or `--no-index` option (in any form pip reads, in
+      it or in the files it pulls in with `-r` and `-c`), a `pyproject.toml` with no index or sources in
+      `[tool.uv]`, `[tool.uv.pip]`, `[tool.poetry]`, `[tool.pdm]` or `[tool.pixi.pypi-options]`, a script whose
+      `# /// script` block has none in its `[tool.uv]`, or a `Pipfile.lock` whose sources are all PyPI. A
       `-c` file that isn't read (a URL or `${VAR}`) or an abbreviated `--requirement`/`--constraint` option counts as
       naming one.
     - **No `uv.toml`, `pyproject.toml` or `pdm.toml` sets an index** in the input's folder or a folder above it, up to
       the repository root (the first with a `.git`). One that can't be read counts as setting one.
-    - **No environment variable sets one:** `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
-      `PIP_NO_INDEX`, `PIP_CONFIG_FILE` (any case after `PIP_`), `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_INDEX`,
-      `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`, `UV_NO_INDEX`, `UV_CONFIG_FILE` or any `UV_INDEX_*`.
+    - **No environment variable sets one:** `PIP_INDEX_URL`, `PIP_PYPI_URL`, `PIP_EXTRA_INDEX_URL`,
+      `PIP_FIND_LINKS`, `PIP_NO_INDEX`, `PIP_CONFIG_FILE` (any case after `PIP_`), `UV_INDEX_URL`,
+      `UV_DEFAULT_INDEX`, `UV_INDEX`, `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`, `UV_NO_INDEX`, `UV_CONFIG_FILE` or any
+      `UV_INDEX_*`.
 
 So `pdm.lock` entries, `poetry.lock` and `pixi.lock` entries that record no index, `pylock.toml` entries without an
 `index`, and packages from another index are never sent. User and system settings aren't read: a `pip.conf` or

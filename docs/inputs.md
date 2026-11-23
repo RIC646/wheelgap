@@ -410,6 +410,22 @@ and to every requirement, including those in `-r` and `-c` files: with `--no-bin
 (`source` if it has an sdist), and with `--only-binary` a package with no fitting wheel is `missing`, since pip won't
 build it. `--explain` says which option did it.
 
+**`--pre`, `--all-releases`, `--only-final` and `--prefer-binary`** lines are read as pip 26.3 reads them (after
+0.13.0), in the file and in the files it includes. With `--pre` (anywhere in the file, before or after the requirement),
+a range or a bare name is checked at the newest matching release, pre-releases included, as pip installs it:
+`tokenizers>=0.23` is `1.0.0rc5`, not `0.23.3`. `--all-releases NAMES` allows pre-releases for those packages (`:all:`
+for every package), and `--only-final NAMES` never takes one; a package named wins over `:all:`, and later lines change
+earlier ones, as in pip. Under `--only-final`, a pin to a pre-release (`demo==2.0rc1`) is `unknown`, since pip finds no
+version for it. A pin to any other version isn't affected. pip ignores `--pre` and `--prefer-binary` on a line with `-r`
+or `-c` (`--pre -r base.txt`): it reads the file and drops the line's other options, and wheelgap does the same. pip
+ignores them on a line with `-e` (`--pre -e ./pkg`) too, which it reads as a requirement. `--all-releases` and
+`--only-final` count on both kinds of line, and after a requirement too, because pip's parser applies them as it reads
+the line (and so do `--no-binary` and `--only-binary`). `--prefer-binary` makes pip take an older release that has a
+wheel over a newer one with only an sdist; wheelgap still checks the newest, and says so on stderr when the file has an
+unpinned requirement: `wheelgap: note: requirements.txt:1 sets --prefer-binary: for an unpinned requirement pip may take
+an older release that has a wheel, and wheelgap checked the newest` (`-q` drops it). [`--deps`](cli.md#deps) refuses a
+file with any of these four options, since they change every dependency's release too.
+
 The same two options written after a requirement (`albumentations>=0.3.2 --no-binary qudida,albumentations`, after
 0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line
 of its own, not only for that requirement. `--config-settings` after a requirement is accepted as before.
@@ -432,11 +448,10 @@ weren't there, from the same index and at the same version, and no file they nam
 too and says so on stderr, once per file and option (`-q` drops it):
 `wheelgap: note: requirements.txt:2: pip ignores -f after a requirement`. To use another index or folder, put the
 option on a line of its own. `--use-feature` is accepted without a note, since no feature changes which file pip
-picks. The rest is an input error that names the file and line: an option pip doesn't have, an ambiguous
-abbreviation, a missing value or one pip's parser refuses (`--hash=abc`, `-C foo`, `--no-binary --pre`)
-(pip refuses the line too); `-e` (pip reads it as making the requirement itself
-editable, and refuses that for a name); and `--all-releases` / `--only-final`, which pip applies to the whole install
-and wheelgap doesn't read.
+picks, and `--all-releases` / `--only-final` are read as on a line of their own (see above). The rest is an input
+error that names the file and line: an option pip doesn't have, an ambiguous abbreviation, a missing value or one
+pip's parser refuses (`--hash=abc`, `-C foo`, `--no-binary --pre`, `--only-final --pre`) (pip refuses the line too);
+and `-e` (pip reads it as making the requirement itself editable, and refuses that for a name).
 
 An included file that can't be read (`-r FILE` or `-c FILE` naming a file that isn't there) is an input error that
 names the including file and line, `requirements.txt:3: -r base.txt: file not found`; pip stops there too.
@@ -460,7 +475,14 @@ the link points into (after 0.13.0).
 
 **Skipped:** editable lines (`-e`), local paths (lines starting with `.` or `/`) and URLs (`git+https://…`,
 `name @ https://…`). Other pip options in the file, such as `--index-url`, are ignored: use wheelgap's
-own [`--index-url`](cli.md#index-url) to look packages up on another index.
+own [`--index-url`](cli.md#index-url) to look packages up on another index. An index option on a line of its own
+(`-i` / `--index-url` / `--pypi-url`, `--extra-index-url`, `-f` / `--find-links` or `--no-index`, in the file or one
+it includes) changes where pip looks, so wheelgap's answer is PyPI's alone, and (after 0.13.0) it says so on stderr,
+once per input, naming the option but never its value: `wheelgap: note: requirements.txt sets --extra-index-url,
+which wheelgap doesn't read: its packages were checked on PyPI only, so a package pip finds elsewhere may install
+differently`. `-q` drops the note, and a run with `--index-url` or a `WHEELGAP_INDEX_URL` mirror doesn't print it,
+since that run doesn't check PyPI. An index option on a line with `-r` or `-c` (`--find-links wheels -r base.txt`)
+gets no note: pip 26.3 reads the file and ignores the line's other options, so it looks on PyPI too.
 
 **`--deps`:** with [`--deps`](cli.md#deps) a requirements file is resolved instead — every requirement line is a
 root, and the whole tree it installs is checked per target. Constraint files and `--no-binary` / `--only-binary`
@@ -485,7 +507,7 @@ wheelgap environment.yml -p 3.12 -t linux-aarch64,win-arm64
 
 **Read:** each item in a `pip:` list is read as a [requirements file](#requirements-files) line, so pins, ranges,
 markers, `-r` / `-c` includes, `--no-binary` / `--only-binary` and `--deps` work the same way. An `--index-url` or
-`--extra-index-url` entry in `pip:` marks the file as not PyPI-only, just as in a requirements file.
+`--extra-index-url` entry in `pip:` marks the file as not PyPI-only, and gets the same note, just as in a requirements file.
 
 **Skipped:** conda dependencies (such as `python=3.12`, `numpy`, `pip`) are listed as skipped (`conda`), and editable,
 path and URL lines under `pip:` are skipped as in a requirements file. When the `pip:` list is empty (or absent),

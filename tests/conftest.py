@@ -22,6 +22,9 @@ FAKE_INDEX = {
             "newpylag-1.0.tar.gz",
         ]
     },
+    # The newest release is a pre-release with only an sdist; the newest final one has a wheel. --pre in a
+    # requirements file makes pip 26.3 take 2.0rc1 (#634). 1.0 is last, so it's PyPI's "latest".
+    "prelib": {"2.0rc1": ["prelib-2.0rc1.tar.gz"], "1.0": ["prelib-1.0-py3-none-any.whl", "prelib-1.0.tar.gz"]},
     "cp314only": {"1.0": ["cp314only-1.0-cp314-cp314-manylinux_2_17_x86_64.whl"]},  # no sdist: missing on 3.15
     "forked": {"0.9": ["forked-0.9.tar.gz"], "1.0": ["forked-1.0.tar.gz"]},
     "ranged": {

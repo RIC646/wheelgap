@@ -2233,6 +2233,7 @@ def _apply_release_options(line: str, format_control: _FormatControl, where: str
     except ValueError:
         return  # _read_requirements has refused the line already
     refused = f"{where}: pip refuses this line:"
+    found: list[tuple[str, str | None]] = []
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -2256,6 +2257,11 @@ def _apply_release_options(line: str, format_control: _FormatControl, where: str
         if entry[1] and value is None:
             value = tokens[i] if i < len(tokens) else None
             i += 1
+        found.append((name, value))
+    # A line with -e is a requirement line to pip (ParsedLine.requirement is the editable), so handle_line never
+    # hands it to handle_option_line: pip 26.3 takes no pre-release for `--pre -e ./pkg`.
+    handled = handled and all(name != "--editable" for name, _ in found)
+    for name, value in found:
         if name in ("--all-releases", "--only-final"):
             if value is None:
                 raise SourceError(f"{refused} {name} option requires 1 argument")
@@ -2760,6 +2766,12 @@ def _read_requirements(
                 pkgs.extend(included)
                 continue
             if line.startswith("-e ") or line.startswith("--editable"):
+                if format_control is not None:
+                    # pip's parser callbacks apply `-e ./pkg --all-releases demo` and `-e ./pkg --no-binary demo` as
+                    # it reads the line, though the line is a requirement to pip (pip 26.3 ran both).
+                    _apply_format_options(line, format_control)
+                    where = _shown(path, stack) + (f":{number}" if number is not None else "")
+                    _apply_release_options(line, format_control, where, handled=False)
                 if not already_seen:
                     name = line.split("#egg=", 1)[1] if "#egg=" in line else line.split(None, 1)[-1]
                     append(Package(name, None, skip="editable", origin=path.name))

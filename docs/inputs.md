@@ -411,19 +411,20 @@ and to every requirement, including those in `-r` and `-c` files: with `--no-bin
 build it. `--explain` says which option did it.
 
 **`--pre`, `--all-releases`, `--only-final` and `--prefer-binary`** lines are read as pip 26.3 reads them (after
-0.13.0), in the file and in the files it includes. With `--pre` (anywhere in the file, before or after the
-requirement), a range or a bare name is checked at the newest matching release, pre-releases included, as pip installs
-it: `tokenizers>=0.23` is `1.0.0rc5`, not `0.23.3`. `--all-releases NAMES` allows pre-releases for those packages
-(`:all:` for every package), and `--only-final NAMES` never takes one; a package named wins over `:all:`, and later
-lines change earlier ones, as in pip. Under `--only-final`, a pin to a pre-release (`demo==2.0rc1`) is `unknown`,
-since pip finds no version for it. A pin to any other version isn't affected. pip ignores `--pre` and
-`--prefer-binary` on a line with `-r` or `-c` (`--pre -r base.txt`): it reads the file and drops the line's other
-options, and wheelgap does the same. `--all-releases` and `--only-final` count there, and after a requirement too,
-because pip's parser applies them as it reads the line. `--prefer-binary` makes pip take an older release that has a
-wheel over a newer one with only an sdist; wheelgap still checks the newest, and says so on stderr when the file has
-an unpinned requirement: `wheelgap: note: requirements.txt:1 sets --prefer-binary: for an unpinned requirement pip may
-take an older release that has a wheel, and wheelgap checked the newest` (`-q` drops it). [`--deps`](cli.md#deps)
-refuses a file with any of these four options, since they change every dependency's release too.
+0.13.0), in the file and in the files it includes. With `--pre` (anywhere in the file, before or after the requirement),
+a range or a bare name is checked at the newest matching release, pre-releases included, as pip installs it:
+`tokenizers>=0.23` is `1.0.0rc5`, not `0.23.3`. `--all-releases NAMES` allows pre-releases for those packages (`:all:`
+for every package), and `--only-final NAMES` never takes one; a package named wins over `:all:`, and later lines change
+earlier ones, as in pip. Under `--only-final`, a pin to a pre-release (`demo==2.0rc1`) is `unknown`, since pip finds no
+version for it. A pin to any other version isn't affected. pip ignores `--pre` and `--prefer-binary` on a line with `-r`
+or `-c` (`--pre -r base.txt`): it reads the file and drops the line's other options, and wheelgap does the same. pip
+ignores them on a line with `-e` (`--pre -e ./pkg`) too, which it reads as a requirement. `--all-releases` and
+`--only-final` count on both kinds of line, and after a requirement too, because pip's parser applies them as it reads
+the line (and so do `--no-binary` and `--only-binary`). `--prefer-binary` makes pip take an older release that has a
+wheel over a newer one with only an sdist; wheelgap still checks the newest, and says so on stderr when the file has an
+unpinned requirement: `wheelgap: note: requirements.txt:1 sets --prefer-binary: for an unpinned requirement pip may take
+an older release that has a wheel, and wheelgap checked the newest` (`-q` drops it). [`--deps`](cli.md#deps) refuses a
+file with any of these four options, since they change every dependency's release too.
 
 The same two options written after a requirement (`albumentations>=0.3.2 --no-binary qudida,albumentations`, after
 0.13.0) are read too, and mean what pip makes of them: the option counts for the whole install, exactly as on a line

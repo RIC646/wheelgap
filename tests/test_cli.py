@@ -491,6 +491,8 @@ def _prelib(capsys, tmp_path, text, *argv):
         ("--pre\n--only-final prelib\nprelib>=0.5\n", "1.0", "wheel"),
         ("--pre\nprelib==1.0\n", "1.0", "wheel"),  # a pin isn't affected
         ("--pre -r base.txt\n", "1.0", "wheel"),  # pip ignores --pre on a -r line
+        ("--pre -e ./local\nprelib>=0.5\n", "1.0", "wheel"),  # and on a -e line, a requirement line to pip
+        ("-e ./local --all-releases prelib\nprelib>=0.5\n", "2.0rc1", "source"),  # its parser applies this one
     ],
 )
 def test_requirements_pre_picks_the_release_pip_installs(capsys, fake_pypi, tmp_path, text, version, status, argv):
@@ -515,6 +517,14 @@ def test_requirements_pre_on_a_simple_index(capsys, fake_simple, tmp_path):
         capsys, tmp_path, "prelib>=0.5\n", "-p", "3.13", "--index-url", "https://simple.example/simple"
     )
     assert code == 0 and packages[0]["version"] == "1.0"
+
+
+def test_requirements_no_binary_on_an_editable_line(capsys, fake_pypi, tmp_path):
+    # pip 26.3's parser callback applies `-e ./local --no-binary demo` to the whole install, though the line is a
+    # requirement to pip: with only wheels on the index it finds no demo.
+    code, packages, _ = _prelib(capsys, tmp_path, "-e ./local --no-binary prelib\nprelib==1.0\n", "-p", "3.13")
+    (pkg,) = [p for p in packages if p["name"] == "prelib"]
+    assert code == 1 and pkg["results"]["linux-x86_64"] == "source"
 
 
 def test_requirements_only_final_refuses_a_pinned_pre_release(capsys, fake_pypi, tmp_path):

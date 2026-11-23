@@ -60,8 +60,10 @@ def test_pip_way_for_package_names_and_the_same_exit_code(capsys, fake_pypi, gap
         f"  --extra-index-url {INDEX}\n"
         "or pass it to pip install:\n"
         f"  pip install --extra-index-url {INDEX} ...\n"
-        "If the requirements pin hashes, also add each wheel's hash to its line:\n"
-        f"  nowheels==0.9 --hash=sha256:{'ab' * 32}\n"
+        "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
+        "(on a second line for the same package, pip won't use them):\n"
+        "  add to the nowheels==0.9 line:\n"
+        f"    --hash=sha256:{'ab' * 32}\n"
         f"{gapwheels.PIP_CAVEAT}\n"
         "\n"
         "How these wheels are built and checked: https://wheelgap.github.io/wheels/\n"
@@ -75,6 +77,62 @@ def test_pip_way_for_a_requirements_file(capsys, fake_pypi, gap_wheels, tmp_path
     (tmp_path / "requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
     code, out, _ = run(capsys, str(tmp_path / "requirements.txt"), "-p", "3.14t", "-t", "win-arm64", "--fix")
     assert code == 1 and "  nowheels 0.9: win-arm64\n" in out and f"  --extra-index-url {INDEX}\n" in out
+
+
+# A package a gap wheel fills on two targets: pip allows only the hashes that every line for a package shares, so
+# both wheels' hashes go on the package's one existing line, never one line per wheel (#695).
+TWO_TARGETS = ["-p", "3.14t", "-t", "win-arm64,win-amd64", "--fix"]
+HASHES = f"--hash=sha256:{'ab' * 32} --hash=sha256:{'cd' * 32}"
+
+
+def _two_target_wheels(gap_wheels):
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    gap_wheels.add("nowheels", "0.9", "nowheels-0.9-cp314-cp314t-win_amd64.whl", sha256="cd" * 32)
+
+
+def test_hashes_of_a_package_on_two_targets_go_on_its_one_line(capsys, fake_pypi, gap_wheels, tmp_path):
+    _two_target_wheels(gap_wheels)
+    reqs = tmp_path / "requirements.txt"
+    reqs.write_text(f"nowheels==0.9 --hash=sha256:{'00' * 32}\n", encoding="utf-8")
+    code, out, _ = run(capsys, str(reqs), *TWO_TARGETS)
+    assert code == 1
+    assert out.endswith(
+        "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
+        "(on a second line for the same package, pip won't use them):\n"
+        "  add to the nowheels==0.9 line:\n"
+        f"    {HASHES}\n"
+        f"{gapwheels.PIP_CAVEAT}\n"
+        "\n"
+        "How these wheels are built and checked: https://wheelgap.github.io/wheels/\n"
+    )
+    assert out.count("--hash=") == 2 and "nowheels==0.9 --hash" not in out  # no line pip would take as a requirement
+
+
+def test_hashes_of_a_package_on_two_targets_in_markdown(capsys, fake_pypi, gap_wheels):
+    _two_target_wheels(gap_wheels)
+    code, out, _ = run(capsys, "nowheels==0.9", *TWO_TARGETS, "--markdown")
+    assert code == 1
+    assert (
+        "If the requirements pin hashes, add each package's hashes to its existing line, keeping the hashes it has "
+        "(on a second line for the same package, pip won't use them):\n"
+        "\n"
+        f"- add to the `nowheels==0.9` line: `{HASHES}`\n"
+        "\n"
+    ) in out
+    assert out.count("--hash=") == 2 and "nowheels==0.9 --hash" not in out
+
+
+def test_hashes_of_a_package_on_two_targets_in_the_snippet(capsys, fake_pypi, gap_wheels, tmp_path):
+    _two_target_wheels(gap_wheels)
+    reqs = tmp_path / "requirements.txt"
+    reqs.write_text("nowheels==0.9\n", encoding="utf-8")
+    code, out, _ = run(capsys, str(reqs), *TWO_TARGETS, "--print-gap-wheel-snippet")
+    assert code == 1
+    assert out.endswith(
+        f"--extra-index-url {INDEX}\n"
+        "# If the requirements pin hashes, add these to the existing nowheels==0.9 line, keeping the hashes it has "
+        f"(not as a line of their own, which pip won't use): {HASHES}\n"
+    )
 
 
 def test_pip_way_for_a_conda_environment_file(capsys, fake_pypi, gap_wheels, tmp_path):
@@ -545,7 +603,7 @@ def test_dev_group_package_is_listed_where_its_parent_is_not_in_project_dependen
 def test_the_same_target_from_two_inputs_is_listed_once():
     lines = gapwheels.text_lines([_fill("requirements", "a.txt"), _fill("requirements", "b.txt")], False)
     assert "  x 1: win-arm64" in lines
-    assert sum(line.startswith("  x==1 --hash=") for line in lines) == 1
+    assert lines.count("  add to the x==1 line:") == 1 and sum("--hash=" in line for line in lines) == 1
 
 
 def test_no_binary_package_isnt_blamed_on_its_origin(capsys, fake_pypi, gap_wheels, tmp_path):
@@ -912,7 +970,8 @@ def test_print_gap_wheel_snippet_for_a_requirements_file(capsys, fake_pypi, gap_
         "# fills: nowheels 0.9: win-arm64\n"
         f"# {gapwheels.PIP_CAVEAT}\n"
         f"--extra-index-url {INDEX}\n"
-        f"# If the requirements pin hashes, add --hash=sha256:{'ab' * 32} to the nowheels==0.9 line.\n"
+        "# If the requirements pin hashes, add these to the existing nowheels==0.9 line, keeping the hashes it has "
+        f"(not as a line of their own, which pip won't use): --hash=sha256:{'ab' * 32}\n"
     )
     assert requirements.read_text(encoding="utf-8") == "nowheels==0.9\n"
     assert list(tmp_path.iterdir()) == [requirements]

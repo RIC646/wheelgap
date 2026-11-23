@@ -411,7 +411,7 @@ gaps: fastlib, nativeext, puresdist
 
 ## Installing from the gap wheel index
 
-The [gap wheel index](https://wheelgap.github.io/wheels/) is a supplementary pip index for packages that do not yet publish every needed wheel on PyPI. Its current coverage is Windows on ARM with CPython 3.14 and free-threaded 3.14t; Linux wheels are not published yet. Check the index page for the latest coverage.
+The [gap wheel index](https://wheelgap.github.io/wheels/) is a supplementary pip index for packages that do not yet publish every needed wheel on PyPI. It has wheels for Windows on ARM (CPython 3.14 and free-threaded 3.14t), Windows x64 and Linux x86_64 (`manylinux_2_28`, for glibc 2.28 and newer) for CPython 3.15, Linux x86_64 for free-threaded 3.14t, and Alpine Linux on ARM (`musllinux_1_2_aarch64`) for CPython 3.14. The index page [lists every published wheel](https://wheelgap.github.io/wheels/#published_wheels).
 
 It works with pip and uv. uv's default [first-index strategy](https://docs.astral.sh/uv/concepts/indexes/#first-index) takes all of a package's files from the first index that has it, so each package's page on this index also lists every file PyPI has for it (refreshed hourly), plus the gap wheel. With uv, pin only the packages that need it to the index as an explicit index, as `--fix` prints below.
 
@@ -426,9 +426,10 @@ wheelgap uv.lock -p 3.14t -t win-arm64 --fix
 
 A gap counts only when it's `source` or `missing`, the package is [positively PyPI's](how-it-works.md#pypi-origin), and
 the index has a wheel of exactly that version that the target accepts. The exit code doesn't change: wheelgap still
-reports what PyPI has. For a requirements file or package names it prints the `--extra-index-url` line (with each
-wheel's `--hash`, for requirements that pin hashes); for a uv.lock it prints a `pyproject.toml` snippet that adds the
-index with `explicit = true` and points each package at it in `[tool.uv.sources]`. uv applies `[tool.uv.sources]` only
+reports what PyPI has. For a requirements file or package names it prints the `--extra-index-url` line (and, for
+requirements that pin hashes, each package's gap wheel `--hash` options to add to its existing line); for a uv.lock
+it prints a `pyproject.toml` snippet that adds the index with `explicit = true` and points each package at it in
+`[tool.uv.sources]`. uv applies `[tool.uv.sources]` only
 to direct dependencies: for a package that comes in through another one, `--fix` also says to list it where that one is
 (the same dependencies, dependency group or extra), and when the lock can't show whether a package is direct, it says
 to list it to be safe. Other lockfiles get a line saying to add the index where the lockfile is made. Only follow the
@@ -459,8 +460,10 @@ jobs:
 
 ### Docker
 
-Docker images are Linux, and the index has no Linux wheels yet, so it doesn't help a Docker build today. Run
-`wheelgap --dockerfile Dockerfile` to see which packages your image will build from source instead.
+The index has Linux wheels for glibc images on x86_64 (`python:3.15-slim`, say) and for Alpine on ARM, for the
+Pythons listed above. Run `wheelgap --dockerfile Dockerfile --dockerfile-inputs --fix` to see which packages your image
+will build from source and which of them the index fills, then add the `--extra-index-url` line to the requirements file
+the image installs.
 
 ### In the project
 
@@ -469,3 +472,20 @@ Put the setting in the project's `requirements.txt`, so it applies to that proje
 ```text
 --extra-index-url https://wheelgap.github.io/wheels/simple/
 ```
+
+If the file pins hashes (`--require-hashes`, or `--hash` options from `pip-compile --generate-hashes` or
+`uv pip compile --generate-hashes`), pip installs only files whose hash is listed. `--fix` prints each package's gap
+wheel hashes under an `add to the lz4==4.4.5 line:` label. Add them to that requirement's own `\`-continued block,
+keeping the hashes it has: put each right after the `lz4==4.4.5 \` line, ending it with ` \`:
+
+```text
+lz4==4.4.5 \
+    --hash=sha256:265974dacdab81e7790ebb14d95948e1909bc717b1cd9619ad450f494c9fe21a \
+    --hash=sha256:0846e6e78f374156ccf21c631de80967e03cc3c01c373c665789dc0c5431e7fc \
+    ...
+```
+
+A hash outside the block doesn't count. pip ignores one on a line of its own after the block, with only a warning
+(`has --hash but no requirement, and will be ignored`). A second `lz4==4.4.5 --hash=…` line doesn't work either: pip
+allows only the hashes every line for a package shares. Either way it won't use the gap wheel: it builds the sdist,
+or fails with `THESE PACKAGES DO NOT MATCH THE HASHES`.

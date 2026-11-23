@@ -2522,6 +2522,11 @@ def _assert_matches_output_schema(data):
     assert isinstance(data, dict)
     for key in ("version", "sources", "targets", "packages", "skipped", "ignored", "ignored_targets", "summary"):
         assert key in data
+    if "fix_summary" in data:
+        fs = data["fix_summary"]
+        assert fs["gaps"] == fs["upgrade"] + fs["gap_wheel"] + fs["none"]
+        kinds = [e["kind"] for p in data["packages"] for e in p.get("fix", {}).values()]
+        assert fs == {"gaps": len(kinds), **{k: kinds.count(k) for k in ("upgrade", "gap_wheel", "none")}}
     assert isinstance(data["version"], str) and data["version"]
     assert isinstance(data["sources"], list) and all(isinstance(s, str) for s in data["sources"])
     assert isinstance(data["ignored"], list) and all(isinstance(s, str) for s in data["ignored"])
@@ -2559,6 +2564,7 @@ def _assert_matches_output_schema(data):
             "suggest",
             "last_with_wheel",
             "gap_wheel",
+            "fix",
             "pip_refuses",
         }
         assert isinstance(pkg["name"], str) and pkg["name"]
@@ -2603,6 +2609,16 @@ def _assert_matches_output_schema(data):
             assert set(pkg["suggest"]) <= set(pkg["rejected"]) and all(
                 isinstance(v, str) for v in pkg["suggest"].values()
             )
+        if "fix" in pkg:  # --fix: one entry per gap target, with the keys of its kind
+            gap_labels = {k for k, v in pkg["results"].items() if v in ("source", "missing")}
+            assert set(pkg["fix"]) <= gap_labels
+            keys = {
+                "upgrade": {"version", "how", "constraint", "gap_wheel"},
+                "gap_wheel": {"wheel", "url", "sha256", "unofficial"},
+                "none": {"reason", "abi3_only"},
+            }
+            for entry in pkg["fix"].values():
+                assert set(entry) == {"kind"} | keys[entry["kind"]]
         if "gap_wheel" in pkg:
             assert set(pkg["gap_wheel"]) <= set(pkg.get("rejected", {}))
             for label, wheel in pkg["gap_wheel"].items():

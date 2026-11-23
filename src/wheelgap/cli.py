@@ -20,7 +20,7 @@ from packaging.markers import InvalidMarker, Marker
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
-from . import __version__, cache, condaforge, gapwheels, origin, piwheels
+from . import __version__, cache, condaforge, fix, gapwheels, origin, piwheels
 from . import notes as tracker
 from . import suggest as release_suggest
 from .api import explain_issues_urls, running_python
@@ -1025,6 +1025,7 @@ def report_json(
     issues_urls: dict[int, str | None] | None = None,
     gap_wheels: list[gapwheels.Fill] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
+    fix_cells: list[fix.Cell] | None = None,
     dockerfile_inputs: list[dict[str, str | int | list[str]]] | None = None,
     dockerfile_notes: list[dict[str, object]] | None = None,
     dockerfile_warnings: list[dict[str, object]] | None = None,
@@ -1043,6 +1044,8 @@ def report_json(
             "error": r.package.error,
             "results": {t.label(multi_py): r.results[t].value for t in targets},
         }
+        if fix_cells is not None:  # --fix: by gap target, its way out (an upgrade, a gap wheel or none)
+            out["fix"] = {c.target.label(multi_py): fix.to_json(c) for c in fix_cells if c.row is r}
         if pyodide_lock and Status.BUNDLED in r.results.values():
             out["bundled"] = pyodide_lock.packages[r.package.key]
             out["bundled_version_differs"] = bundled_version_differs(r.package, pyodide_lock)
@@ -1144,6 +1147,8 @@ def report_json(
         report["blocking_newer_python"] = blocking.names
     if gap_wheels is not None:  # --fix: one entry per gap cell a wheel on the gap wheel index fills
         report["gap_wheels"] = gapwheels.to_json(gap_wheels, multi_py)
+    if fix_cells is not None:  # --fix: how many gap cells an upgrade, a gap wheel or nothing fixes
+        report["fix_summary"] = fix.counts(fix_cells)
     if dockerfile_inputs is not None:
         report["dockerfile_inputs"] = dockerfile_inputs
     if dockerfile_notes:
@@ -1873,18 +1878,38 @@ def version_suggestions(
     """--suggest: look the pinned gap packages' releases up on PyPI, one request per name, and return what to move to,
     by id() of the package. Only names that are positively PyPI's are looked up, by the rule --conda-forge follows
     (origin.known_pypi), and nothing in a run that uses another index; notes on stderr say which weren't, and why."""
+    return release_lookups(gaps, targets, sources, index_url, quiet)[0]
+
+
+PRIVATE_WHY = "wheelgap can't tell they come from PyPI, so their names stay private (see how-it-works.md#pypi-origin)"
+
+
+def release_lookups(
+    gaps: list[Row],
+    targets: list[Target],
+    sources: list[Source],
+    index_url: str | None,
+    quiet: bool,
+    flag: str = "--suggest",
+) -> tuple[Suggestions, dict[int, str]]:
+    """version_suggestions' lookups, for --suggest and --fix (`flag`, which the notes name), plus why the releases of
+    the other pinned gap packages weren't looked up (or couldn't be), by id() of the package. For --fix, the notes on
+    stderr about another index and about names kept private are left out: its own section says so, in one line."""
     other = origin.other_index(index_url)
+    notes = flag == "--suggest"
     if other is not None:
-        if not quiet:
+        if notes and not quiet:
             print(
                 f"wheelgap: note: --suggest looks nothing up when packages come from another index ({other})",
                 file=sys.stderr,
             )
-        return {}
+        why = f"packages may come from another index ({other}), so no names went to pypi.org"
+        return {}, {id(r.package): why for r in gaps if r.package.version and not r.package.no_binary}
     elsewhere = origin.private_names(sources, simple_index=index_url)
     source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
     asked: dict[str, list[Row]] = {}  # by canonical name: one lookup per package, however many rows it has
     kept_in: dict[str, str] = {}
+    skipped: dict[int, str] = {}
     for r in gaps:
         # Under --no-binary, pip uses no release's wheels, so a newer one with wheels wouldn't close the gap.
         if r.package.version and not r.package.no_binary and gap_targets(r, targets):
@@ -1892,7 +1917,10 @@ def version_suggestions(
                 asked.setdefault(r.package.key, []).append(r)
             else:
                 kept_in.setdefault(r.package.key, r.package.name)
-    if kept_in and not quiet:
+                skipped[id(r.package)] = PRIVATE_WHY
+        elif not r.package.version:
+            skipped[id(r.package)] = "they have no pinned version"
+    if kept_in and notes and not quiet:
         private = list(kept_in.values())
         print(
             f"wheelgap: note: --suggest didn't look up {len(private)} package{'s' * (len(private) != 1)} "
@@ -1913,13 +1941,17 @@ def version_suggestions(
         n = len(failed)
         which = _names([f"{asked[key][0].package.name} ({why})" for key, why in failed.items()])
         print(
-            f"wheelgap: note: --suggest couldn't look up {n} package{'s' * (n != 1)}: {which}; "
+            f"wheelgap: note: {flag} couldn't look up {n} package{'s' * (n != 1)}: {which}; "
             "no suggestion doesn't mean no newer release has wheels",
             file=sys.stderr,
         )
-    return {
+    for key, why in failed.items():
+        for r in asked[key]:
+            skipped[id(r.package)] = f"the lookup failed ({why})"
+    suggestions = {
         id(r.package): s for key, rows in asked.items() if key in found for r, s in zip(rows, found[key], strict=True)
     }
+    return suggestions, skipped
 
 
 FIX_HINT = "Run with --fix to see whether wheelgap's gap wheel index has a wheel for these."
@@ -2010,7 +2042,7 @@ def gap_wheel_fills(
                 )
                 return []
             # Even with -q: without it, a run that couldn't look would read as "no gap wheel fits".
-            print("wheelgap: note: couldn't read the gap wheel list, so --fix has no suggestions", file=sys.stderr)
+            print("wheelgap: note: couldn't read the gap wheel list, so --fix suggests no gap wheels", file=sys.stderr)
             return []
         fills = gapwheels.fillable(wanted, targets, source_of, live_wheels, private, index_url)
         if not fills and not quiet:
@@ -2974,7 +3006,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     conda_forge = conda_forge_hints(gaps, targets, sources, index_url, quiet, cached) if args.conda_forge else {}
     pi_wheels = piwheels_hints(gaps, targets, sources, index_url, quiet, cached) if args.piwheels else {}
     # None: not asked for. Like the hints above, it never changes a status or the exit code.
-    suggestions = version_suggestions(gaps, targets, sources, index_url, quiet) if args.suggest else None
+    suggestions: Suggestions | None = None
+    unlooked: dict[int, str] = {}  # --fix: why a pinned gap package's releases weren't looked up, by id() of it
+    if args.suggest:
+        suggestions, unlooked = release_lookups(gaps, targets, sources, index_url, quiet)
     # With --fail-on missing, source builds are accepted; missing and unknown packages still fail. Gaps on
     # --advisory targets never fail the run.
     fail_statuses = GAP_STATUSES if fail_on == "source" else (Status.MISSING, Status.UNKNOWN)
@@ -3063,6 +3098,14 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         if args.fix
         else None
     )
+    # --fix: each gap cell's way out, an upgrade first (the releases --suggest looks up, looked up once for both).
+    fix_cells: list[fix.Cell] | None = None
+    if args.fix:
+        upgrades = suggestions
+        if upgrades is None:
+            upgrades, unlooked = release_lookups(gaps, targets, sources, index_url, quiet, flag="--fix")
+        source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
+        fix_cells = fix.plan(gaps, targets, source_of, upgrades, fills or [], unlooked)
     # The hint never makes a request: it reads only the list a --fix run left in the cache (kept for
     # cache.GAP_WHEELS_MAX_AGE), and only when a gap could use it. No hint when that list fills nothing; that is
     # silence, not "nothing fits": --fix itself fetches the list again before it says so (gap_wheel_fills).
@@ -3083,6 +3126,8 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         return code
 
     issues_urls = explain_issues_urls(rows, sources, index_url) if args.explain else None
+    # --fix names the issue tracker of a gap with no fix; it's read from the lookups already made, never fetched.
+    fix_issues = (issues_urls or explain_issues_urls(gaps, sources, index_url)) if fix_cells else {}
 
     if args.junit is not None:  # an empty PATH (an unset CI variable) is an error, not "no report"
         try:
@@ -3209,6 +3254,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 dropped,
                 issues_urls=issues_urls,
                 gap_wheels=fills,
+                fix_cells=fix_cells,
                 pi_wheels=pi_wheels,
                 # As the Dockerfile's COPY names it: relative to the build context, with /, whatever the OS, the
                 # working directory or the way the context was given.
@@ -3273,7 +3319,8 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         fix_hint=fix_hint,
                         not_covered=not_covered,
                     ),
-                    *gapwheels.markdown_lines(fills or [], multi_py),
+                    *fix.markdown_lines(fix_cells or [], multi_py, unlooked, fix_issues),
+                    *gapwheels.markdown_lines(fills or [], multi_py, fix.alternatives(fix_cells or [])),
                     *(["", f"> **Warning:** {unseen_line}"] if unseen_line else []),
                     *dockerfile_markdown(dockerfile_results(dockerfile_notes)),
                 ]
@@ -3282,7 +3329,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         return code
 
     style = Style(use_color(args.color))
-    fix_lines = gapwheels.text_lines(fills or [], multi_py)  # nothing unless a gap wheel fills a gap
+    # Nothing without --fix or without a gap: the summary, upgrades and gaps with no fix, then the gap wheels.
+    fix_lines = [
+        *fix.text_lines(fix_cells or [], multi_py, unlooked, fix_issues),
+        *gapwheels.text_lines(fills or [], multi_py, fix.alternatives(fix_cells or [])),
+    ]
     total_pkgs = len(_group_rows(rows))
     if quiet:
         if gaps:

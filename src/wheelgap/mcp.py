@@ -190,16 +190,21 @@ _FIX_HELP = (
     "With fix: true, as --fix does, also says which gaps a wheel on wheelgap's gap wheel index fills: 'gap_wheels' "
     "has one entry per filled gap cell (name, version, target, wheel, url, sha256; [] when none fits), "
     "'gap_wheel_index' is the index to install from and 'gap_wheel_about' the page on how the wheels are built. "
-    "It costs one request to wheelgap.github.io that names no package. The wheels are unofficial: built by wheelgap "
+    "Each gap also gets 'fix', by target: kind 'upgrade' (a newer release has the wheel: version, how), 'gap_wheel' "
+    "or 'none' (reason), and 'fix_summary' counts them; an upgrade comes first, and wheelgap doesn't resolve, so the "
+    "rest of the dependencies must allow it. "
+    "It costs one request to wheelgap.github.io that names no package, plus one to pypi.org per gap package "
+    "positively from PyPI for its release list, as --suggest does. The wheels are unofficial: built by wheelgap "
     "from the PyPI sdist, not by the package's maintainers, so tell the user that and ask before adding the index "
     "to project files. It's off with another index (index-url or WHEELGAP_INDEX_URL: a note says so), and packages "
     "wheelgap can't tell are PyPI's are never looked for. "
 )
 _FIX_PROP = {
     "type": "boolean",
-    "description": "Also return gap_wheels: the gaps a wheel on wheelgap's gap wheel index fills, as --fix does "
-    "(one request to wheelgap.github.io that names no package; the wheels are unofficial builds by wheelgap, so "
-    "ask the user before adding the index). Default: false.",
+    "description": "Also return each gap's fix (a newer release with the wheel first, then a gap wheel) and "
+    "gap_wheels: the gaps a wheel on wheelgap's gap wheel index fills, as --fix does (one request to "
+    "wheelgap.github.io that names no package, and one to pypi.org per gap package positively from PyPI; the wheels "
+    "are unofficial builds by wheelgap, so ask the user before adding the index). Default: false.",
 }
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 
@@ -1211,7 +1216,7 @@ def _run_cli(
             # Apply the same label mapping to dependency paths, not just status cells.
             context = {
                 key: {label.get(t, t): value for t, value in package[key].items()}
-                for key in ("via", "direct")
+                for key in ("via", "direct", "fix")
                 if key in package
             }
             # --explain's other keys (rejected wheels, tracker notes, build needs...) keep the CLI's short labels and
@@ -1255,6 +1260,8 @@ def _run_cli(
         result["gap_wheels"] = [wheel | {"target": label[wheel["target"]]} for wheel in data["gap_wheels"]]
         result["gap_wheel_index"] = gapwheels.INDEX
         result["gap_wheel_about"] = gapwheels.ABOUT
+    if "fix_summary" in data:  # --fix: how many gap cells an upgrade, a gap wheel or nothing fixes
+        result["fix_summary"] = data["fix_summary"]
     return result
 
 

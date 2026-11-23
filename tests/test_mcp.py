@@ -1413,6 +1413,19 @@ def test_check_lockfile_fix_returns_the_gap_wheels(fake_pypi, gap_wheels, tmp_pa
     ]
     assert fixed["gap_wheel_index"] == "https://wheelgap.github.io/wheels/simple/"
     assert fixed["gap_wheel_about"] == "https://wheelgap.github.io/wheels/"
+    # Each gap's way out, labelled like results (after 0.13.0): nowheels has no newer release, so the gap wheel.
+    assert [g.pop("fix") for g in fixed["gaps"]] == [
+        {
+            "3.14t win-arm64": {
+                "kind": "gap_wheel",
+                "wheel": FT_WHEEL,
+                "url": f"{gapwheels.DOWNLOAD}/{FT_WHEEL}",
+                "sha256": "ab" * 32,
+                "unofficial": True,
+            }
+        }
+    ]
+    assert fixed["fix_summary"] == {"gaps": 1, "upgrade": 0, "gap_wheel": 1, "none": 0}
     # It never changes the answer: the gap is still PyPI's.
     assert fixed["gaps"] == data["gaps"] and fixed["ok"] is False and fixed["passes"] is False
 

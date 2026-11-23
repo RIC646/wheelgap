@@ -12,9 +12,8 @@ name: Fix end-to-end
 # - linux-hashes: the same from a hash-pinned file made by `uv pip compile --generate-hashes`, applying the hash
 #   lines --fix prints both as printed (one line each) and added to each package's existing line.
 # - windows: GitHub's Windows runners have MSVC (and gcc, clang and cargo on PATH), so a plain install there can build
-#   from source. It shows
-#   instead that PyPI has no wheel (pip install --only-binary=:all: fails), and that the --fix install takes our
-#   wheels, from pip's --report, rather than building.
+#   from source. It shows instead that PyPI has no wheel (pip install --only-binary=:all: fails), and that the --fix
+#   install takes our wheels, from pip's --report, rather than building.
 #
 # It needs PyPI and wheelgap.github.io, so it's kept out of CI's offline test job: it runs weekly, by hand, and on
 # pull requests that change --fix's output (gapwheels.py) or this check. Read-only and no secrets.

@@ -525,11 +525,17 @@ def test_requirements_index_option_in_an_included_file_is_a_note(capsys, fake_py
 def test_requirements_without_index_option_has_no_index_note(capsys, fake_pypi, tmp_path):
     req = tmp_path / "requirements.txt"
     # --trusted-host names no index, nor does its value; an -f after a requirement is ignored by pip (its own note
-    # says so).
-    req.write_text("--trusted-host -ifoo\npurewheel==3.1\nfastlib==2.0.0 -f ./w\n", encoding="utf-8")
+    # says so), and so is an index option on a line with -r or -c: pip 26.3 reads the file and drops the rest.
+    (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("", encoding="utf-8")
+    req.write_text(
+        "--trusted-host -ifoo\n--find-links ./w -r base.txt\n-c c.txt --extra-index-url https://example.invalid/s\n"
+        "fastlib==2.0.0 -f ./w\n",
+        encoding="utf-8",
+    )
     code, _, err = run(capsys, str(req), "-p", "3.13", "-t", "linux-x86_64")
     assert code == 0 and "doesn't read" not in err
-    assert "requirements.txt:3: pip ignores -f after a requirement" in err
+    assert "requirements.txt:4: pip ignores -f after a requirement" in err
 
 
 def test_requirements_index_note_not_given_when_the_run_names_an_index(

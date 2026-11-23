@@ -1971,7 +1971,9 @@ def _index_option_names(lines: Iterable[str]) -> list[str]:
     abbreviation `--extra URL` is `--extra-index-url`), in order and once each. Tokens are read as pip's optparse reads
     them (_REQUIREMENT_LINE_OPTIONS), so a value (`--trusted-host -ifoo`) and an ambiguous abbreviation (`--no`, which
     pip refuses) name none. A requirement line is passed over: pip ignores an index option after a requirement, and
-    _requirement_options notes that."""
+    _requirement_options notes that. So is a line with -r or -c: pip reads the file it names and never applies the
+    line's other options (`_parse_and_recurse` doesn't hand the line to `handle_option_line`), so pip 26.3 doesn't
+    look in `--find-links wheels -r base.txt`'s folder."""
     names: dict[str, None] = {}
     for line in lines:
         if not line.startswith("-"):
@@ -1980,6 +1982,8 @@ def _index_option_names(lines: Iterable[str]) -> list[str]:
             tokens = shlex.split(line)
         except ValueError:
             continue
+        found: list[str] = []
+        include = False
         i = 0
         while i < len(tokens):
             token = tokens[i]
@@ -2001,10 +2005,13 @@ def _index_option_names(lines: Iterable[str]) -> list[str]:
                 name, attached = entry[0][1], len(token) > 2  # `-fURL` holds its value
             else:
                 continue
+            include = include or name in ("--requirement", "--constraint")
             if name in _INDEX_OPTIONS:
-                names[name] = None
+                found.append(name)
             if entry[1] and not attached:  # `-i URL`, `--extra-index-url URL`: the next token is the value
                 i += 1
+        if not include:
+            names.update(dict.fromkeys(found))
     return list(names)
 
 

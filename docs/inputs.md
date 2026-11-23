@@ -466,7 +466,8 @@ it includes) changes where pip looks, so wheelgap's answer is PyPI's alone, and 
 once per input, naming the option but never its value: `wheelgap: note: requirements.txt sets --extra-index-url,
 which wheelgap doesn't read: its packages were checked on PyPI only, so a package pip finds elsewhere may install
 differently`. `-q` drops the note, and a run with `--index-url` or a `WHEELGAP_INDEX_URL` mirror doesn't print it,
-since that run doesn't check PyPI.
+since that run doesn't check PyPI. An index option on a line with `-r` or `-c` (`--find-links wheels -r base.txt`)
+gets no note: pip 26.3 reads the file and ignores the line's other options, so it looks on PyPI too.
 
 **`--deps`:** with [`--deps`](cli.md#deps) a requirements file is resolved instead — every requirement line is a
 root, and the whole tree it installs is checked per target. Constraint files and `--no-binary` / `--only-binary`

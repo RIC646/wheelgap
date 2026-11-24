@@ -13,8 +13,8 @@ How statuses rank, per target:
 - `unknown` (the package couldn't be checked) isn't on that scale, because it says nothing about what pip
   would do. So a change is never called "not worse" on a guess: anything → `unknown` is worse, and
   `unknown` → `source` or `missing` is worse too. Only `unknown` → `wheel`, `bundled` or `n/a` is not.
-  `unknown` on both sides is unchanged, at the same version or another (neither side was checked, as for
-  skipped below), and a note on stderr names those packages.
+  `unknown` on both sides counts as worse if the version changed; at the same version it's unchanged, and a
+  note on stderr names those packages.
 - A package installed from somewhere wheelgap doesn't check (git, a path, a URL, an editable install or a
   private index) is "skipped" on that target and treated like `unknown`: anything → skipped is worse, and
   skipped → `source` or `missing` is too. Skipped on both sides is unchanged. A new skipped package counts as
@@ -36,6 +36,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -154,6 +155,8 @@ def worse_on(was: Package, now: Package, t: Target) -> bool:
         return t not in was.skips  # skipped on both sides: neither was checked, so nothing changed
     if t in was.skips:
         return now.statuses[t] in GAPS  # like unknown → a status
+    if was.statuses[t] is Status.UNKNOWN and now.statuses[t] is Status.UNKNOWN:
+        return was.version != now.version  # a new release may have lost a wheel
     return worse(was.statuses[t], now.statuses[t])
 
 
@@ -199,8 +202,8 @@ def _with_direct(pkg: Package, targets: list[Target]) -> str:
 
 
 def compare(before: dict[str, Package], after: dict[str, Package], targets: list[Target]) -> Report:
-    """Packages that got worse and new packages with gaps, with the names that couldn't be checked on either
-    side."""
+    """Packages that got worse and new packages with gaps, with the names that couldn't be checked at the
+    same version on either side."""
     multi_py = len({t.python for t in targets}) > 1
     report = Report()
     for key, pkg in after.items():
@@ -448,6 +451,32 @@ def _check_index_url() -> None:
         ) from None
 
 
+def _refuse_index_url(table: dict, where: str) -> None:
+    """diff looks packages up on PyPI (or a WHEELGAP_INDEX_URL mirror) only, so the simple index the main command
+    would use for `index-url` in [tool.wheelgap] would be ignored without a word: refuse it instead."""
+    if table.get("index-url") is not None:  # set at all, as the main command reads it (an empty value is its error)
+        raise SourceError(
+            f"{where} sets index-url in [tool.wheelgap], which wheelgap diff doesn't read yet, so it would check "
+            "PyPI instead of that index; check each lockfile with wheelgap instead, which uses it"
+        )
+
+
+def _input_index_url(path: str, label: str) -> None:
+    """Refuse `index-url` in the pyproject.toml the main command would read for this input (for a REF:PATH, the
+    copy from that ref). Only that key is read: diff takes its other settings from the NEW input's project."""
+    pyproject = find_pyproject([path])
+    if pyproject is None:
+        return
+    try:
+        table = tomllib.loads(pyproject.read_text(encoding="utf-8-sig")).get("tool", {}).get("wheelgap", {})
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise SourceError(
+            f"the pyproject.toml beside {label} can't be read, so its index-url isn't known: {e}"
+        ) from None
+    if isinstance(table, dict):
+        _refuse_index_url(table, f"the pyproject.toml beside {label}")
+
+
 def _main(argv: list[str] | None, prog: str) -> int:
     p = argparse.ArgumentParser(prog=prog, description=__doc__.splitlines()[0])
     p.add_argument(
@@ -496,6 +525,8 @@ def _main(argv: list[str] | None, prog: str) -> int:
         config_inputs = _config_inputs(args.new, deps=args.deps)
         pyproject = find_pyproject(config_inputs)
         config = load_config(pyproject) if pyproject else {}
+        if pyproject:
+            _refuse_index_url(config, str(pyproject))
         glibc, musl = libc_versions(args, config)
         pythons = args.python or config.get("python") or read_python_version(project_dir(config_inputs)) or None
         platforms = args.target or config.get("targets", [])
@@ -553,6 +584,8 @@ def _main(argv: list[str] | None, prog: str) -> int:
                 for path in (args.old, args.new):
                     ref = git_ref_input(path)
                     read.append((read_git_ref(*ref, Path(tmp)) if ref is not None else path, ref))
+                for (path, _), label in zip(read, (args.old, args.new), strict=True):
+                    _input_index_url(path, label)  # before any lookup, for either side
                 if not platforms:
                     targets, narrowed = lock_default_targets([Path(path) for path, _ in read], targets)
                     if narrowed is not None:

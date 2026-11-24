@@ -227,16 +227,16 @@ def test_diff_notes_packages_unknown_on_both_sides(fake_pypi, tmp_path, capsys):
     assert "couldn't check does-not-exist in either lockfile" in err
 
 
-def test_diff_unknown_on_both_sides_at_a_new_version_is_unchanged(fake_pypi, tmp_path, capsys):
-    # Neither side was checked, as for a package skipped on both sides: "got worse" would fail a CI gate on nothing.
-    old, new = write_pair(tmp_path, "does-not-exist==1.0\npurewheel==3.1\n", "does-not-exist==2.0\npurewheel==3.1\n")
-    assert main([old, new, *TARGET]) == 0
+def test_diff_counts_unknown_at_a_new_version_as_worse(fake_pypi, tmp_path, capsys):
+    old, new = write_pair(tmp_path, "does-not-exist==1.0\n", "does-not-exist==2.0\n")
+    assert main([old, new, *TARGET]) == 1
     out, err = capsys.readouterr()
-    assert out.splitlines() == ["Nothing got worse."]
-    assert "couldn't check does-not-exist in either lockfile" in err
-    assert main([old, new, *TARGET, "--json"]) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["worse"] == [] and data["unchecked"] == ["does-not-exist"]
+    assert out.splitlines() == [
+        "does-not-exist 1.0 → 2.0",
+        "  linux-x86_64: ? unknown → ? unknown",
+        "1 package got worse.",
+    ]
+    assert "couldn't check" not in err
 
 
 @pytest.mark.parametrize("index", ["https://pypi.org/simple", "https://mirror.example.com/simple/"])
@@ -443,8 +443,41 @@ def test_worse(old, new, expected):
     assert worse(old, new) is expected
 
 
+INDEX_URL_CONFIG = '[tool.wheelgap]\nindex-url = "https://nonexistent.invalid/simple"\n'
+INDEX_URL_REFUSAL = (
+    "sets index-url in [tool.wheelgap], which wheelgap diff doesn't read yet, so it would check PyPI instead of that "
+    "index; check each lockfile with wheelgap instead, which uses it"
+)
+
+
+@pytest.mark.parametrize("side", ["old", "new"])
+@pytest.mark.parametrize("flags", [[], ["--json"]])
+def test_diff_refuses_index_url_in_either_project_before_any_lookup(fake_pypi, tmp_path, capsys, side, flags):
+    # The main command would check these packages on that index; diff checked PyPI and said "Nothing got worse."
+    old, new = write_pair(tmp_path, "purewheel==3.1\n", "purewheel==3.1\n")
+    pyproject = tmp_path / side / "pyproject.toml"
+    pyproject.write_text(INDEX_URL_CONFIG, encoding="utf-8")
+    assert main([old, new, *TARGET, *flags]) == 2
+    out, err = capsys.readouterr()
+    assert fake_pypi == []
+    where = str(pyproject) if side == "new" else f"the pyproject.toml beside {old}"
+    assert err == f"wheelgap: error: SourceError: {where} {INDEX_URL_REFUSAL}\n"
+    assert "nonexistent" not in err  # the URL may hold credentials
+    if flags:
+        assert json.loads(out)["error"] == {"message": f"{where} {INDEX_URL_REFUSAL}", "type": "SourceError"}
+    else:
+        assert out == ""
+
+
+def test_diff_deps_refuses_index_url_in_the_project(fake_pypi, tmp_path, capsys, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(INDEX_URL_CONFIG, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert main(["ranged==1.5", "ranged==1.9", "--deps", *TARGET]) == 2
+    assert fake_pypi == [] and INDEX_URL_REFUSAL in capsys.readouterr().err
+
+
 STATUSES = [Status.WHEEL, Status.BUNDLED, Status.NOT_NEEDED, Status.SOURCE, Status.MISSING, Status.UNKNOWN, "skipped"]
-# Every (old, new) pair that counts as worse, at the same version or another: the rest don't.
+# Every (old, new) pair that counts as worse at any version (and unknown → unknown at a new one): the rest don't.
 WORSE_PAIRS = {
     *((old, new) for old in (Status.WHEEL, Status.BUNDLED, Status.NOT_NEEDED) for new in STATUSES[3:]),
     *((Status.SOURCE, new) for new in STATUSES[4:]),
@@ -467,7 +500,8 @@ def test_worse_on_every_pair(old, new, new_version):
             return Package("x", [version], {t: Status.NOT_NEEDED}, skips={t: "git"})
         return Package("x", [version], {t: status})
 
-    assert worse_on(package(old, "1.0"), package(new, new_version), t) is ((old, new) in WORSE_PAIRS)
+    expected = (old, new) in WORSE_PAIRS or (old is new is Status.UNKNOWN and new_version != "1.0")
+    assert worse_on(package(old, "1.0"), package(new, new_version), t) is expected
 
 
 @pytest.mark.parametrize(
@@ -655,6 +689,20 @@ def test_diff_bad_git_ref_exits_2(fake_pypi, repo, capsys, ref, message):
 def test_diff_bad_git_ref_json_error(fake_pypi, repo, capsys):
     assert main(["nosuchbranch:uv.lock", "uv.lock", *TARGET, "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["type"] == "GitInputError"
+
+
+@needs_git
+def test_diff_refuses_index_url_in_the_ref_copy(fake_pypi, repo, capsys):
+    # The pyproject.toml at the ref comes along with its lockfile, so its index-url counts, as for a file.
+    (repo / "pyproject.toml").write_text(INDEX_URL_CONFIG, encoding="utf-8")
+    git("add", "pyproject.toml", cwd=repo)
+    git("commit", "-q", "-m", "index", cwd=repo)
+    (repo / "pyproject.toml").unlink()
+    assert main(["HEAD:uv.lock", "uv.lock", *TARGET]) == 2
+    assert fake_pypi == []
+    assert capsys.readouterr().err == (
+        f"wheelgap: error: SourceError: the pyproject.toml beside HEAD:uv.lock {INDEX_URL_REFUSAL}\n"
+    )
 
 
 def test_diff_git_ref_without_git_exits_2(fake_pypi, tmp_path, monkeypatch, capsys):

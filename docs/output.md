@@ -543,7 +543,9 @@ nothing to say.
 
 `dockerfile_packages` (after 0.13.0) has one entry per `RUN` line whose `pip install` names requirements on the
 line itself: `dockerfile`, `line`, the `installer` (`pip` or `uv pip`) and the `requirements` as written, variables
-replaced. The line is also a source of its own in `sources` (`Dockerfile:5`). `kind` `arg-value` in
+replaced. Two installs on one line that read different `-r` files (`pip install -r a.txt x && pip install y`) get an
+entry each, since each file's options count for its own install's names only. Each entry is also a source of its own
+in `sources`, labelled with the line (`Dockerfile:5`). `kind` `arg-value` in
 `dockerfile_notes` says an install used an `ARG`'s default or a `--build-arg` value.
 
 `dockerfile_warnings` (after 0.13.0, always there with `--dockerfile-inputs`) lists the `RUN` lines wheelgap

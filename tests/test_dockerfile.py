@@ -2119,6 +2119,16 @@ def test_dockerfile_requirements_keeps_the_names_of_two_installs_with_other_file
     assert report.named_files == [(tmp_path / "a.txt",), (), (tmp_path / "a.txt",)]
 
 
+def test_cli_dockerfile_inputs_notes_a_files_prefer_binary_for_names_on_the_line(tmp_path, capsys, fake_pypi):
+    # pip 26.3 with --prefer-binary in a.txt and `ranged<2` on the line takes ranged 1.5's wheel over 1.9's sdist.
+    path = _context(
+        tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY a.txt .\nRUN pip install -r a.txt 'ranged<2'\n", ["a.txt"]
+    )
+    (tmp_path / "a.txt").write_text("--prefer-binary\n", encoding="utf-8")
+    main(["--dockerfile", str(path), "--dockerfile-inputs", "--no-cache"])
+    assert "note: a.txt:1 sets --prefer-binary: for an unpinned requirement" in capsys.readouterr().err
+
+
 def test_dockerfile_requirements_reads_the_files_of_one_line_together(tmp_path):
     path = _context(tmp_path, _ONE_LINE.format("-r a.txt -r b.txt"), ["a.txt", "b.txt", "c.txt"])
     # A caller that doesn't take the line's other -r files would read each file without the others' options.

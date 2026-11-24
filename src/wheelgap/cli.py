@@ -1789,7 +1789,7 @@ def note_prefer_binary(sources: list[Source]) -> None:
     wheel than the newest, which is the one checked. A pin isn't affected."""
     for source in sources:
         fc = source.format_control
-        if source.requirements and fc is not None and fc.prefer_binary and unpinned_requirement_names(source):
+        if fc is not None and fc.prefer_binary and unpinned_requirement_names(source):
             print(
                 f"wheelgap: note: {fc.prefer_binary} sets --prefer-binary: for an unpinned requirement pip may take "
                 "an older release that has a wheel, and wheelgap checked the newest",
@@ -2721,9 +2721,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     "index-url in [tool.wheelgap]) doesn't have"
                 )
             for source in dependency_sources:
-                # A command-line name is PyPI's by definition; a file may point pip elsewhere, where --deps
-                # can't see, so it refuses rather than answer for the wrong index.
-                if not (source.requirements or source.pyproject_extras is not None):
+                # A command-line name is PyPI's by definition, unless the -r files of its Dockerfile install line
+                # set an index option; a file may point pip elsewhere, where --deps can't see, so it refuses rather
+                # than answer for the wrong index.
+                if not (source.requirements or source.pyproject_extras is not None or not source.pypi_only):
                     continue
                 instead = (
                     ", so check its lock (uv lock --script) instead"

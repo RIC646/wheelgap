@@ -75,7 +75,11 @@ the command line. `list_targets` and `suggest_targets` contact nothing. Like whe
   agent that bumps dependencies can save the old lockfile under its own name
   (`mkdir -p /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock`) and ask
   whether the upgrade lost a wheel. Pass any floors that differ from the
-  defaults explicitly. This tool does not read `[tool.wheelgap]` settings.
+  defaults explicitly. This tool does not read `[tool.wheelgap]` settings, with
+  one exception, as in `wheelgap diff`: when the `pyproject.toml` beside either
+  lockfile sets `index-url`, it is a tool error before any lookup (the URL isn't
+  repeated), since this tool checks PyPI only. Check each lockfile with
+  `check_lockfile`, which uses that index.
 - `explain_install_failure`: takes the text of a failed install log (up to 1 MB)
   and reads it as [`--from-log`](cli.md#from-log) does: pip's `Failed to build` summary
   (its versions from the `Collecting`, `Downloading` and `Using cached` lines),

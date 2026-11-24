@@ -75,7 +75,11 @@ the command line. `list_targets` and `suggest_targets` contact nothing. Like whe
   agent that bumps dependencies can save the old lockfile under its own name
   (`mkdir -p /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock`) and ask
   whether the upgrade lost a wheel. Pass any floors that differ from the
-  defaults explicitly. This tool does not read `[tool.wheelgap]` settings.
+  defaults explicitly. This tool does not read `[tool.wheelgap]` settings, with
+  one exception, as in `wheelgap diff`: when the `pyproject.toml` beside either
+  lockfile sets `index-url`, it is a tool error before any lookup (the URL isn't
+  repeated), since this tool checks PyPI only. Check each lockfile with
+  `check_lockfile`, which uses that index.
 - `explain_install_failure`: takes the text of a failed install log (up to 1 MB)
   and reads it as [`--from-log`](cli.md#from-log) does: pip's `Failed to build` summary
   (its versions from the `Collecting`, `Downloading` and `Using cached` lines),
@@ -211,8 +215,12 @@ leaving the argument out. Other inputs (requirements files, `Pipfile.lock`, `pyl
 With `inputs: true` the tool answers "will this image build without compiling anything?" in one call, as
 `wheelgap --dockerfile DOCKERFILE --dockerfile-inputs --json` does: it checks the requirements files the final
 stage installs, on the image's Python and platform. `path` in the result is then the build context, and `notes`
-names each file read and its line (`Dockerfile:4: RUN pip install -r reads requirements.txt`). Each `dockerfile_inputs` entry
-also lists its `constraints` (`-c` files) and `includes` (the files it includes with `-r` or `-c`). Only a
+names each file read and its line (`Dockerfile:4: RUN pip install -r reads requirements.txt`).
+`dockerfile_inputs` has one entry per file read, with its line, as in `--json`. Each entry
+also lists its `constraints` (`-c` files) and `includes` (the files it includes with `-r` or `-c`). A line wheelgap
+can't see into after the last install it reads (a script, `make`) is in `dockerfile_warnings` (and in `notes`, as
+`warning: Dockerfile:6: …`), and `summary.complete` is then `false`: `ok` and `passes` cover the packages read, not
+what that line installs. Only a
 [strict subset of Dockerfiles](cli.md#dockerfile-inputs) is read this way. A line that may install anything else
 (`RUN pip install .`, say) is a tool error naming the line, never a guess. `inputs` with `path`, and `context`
 without `inputs`, are tool errors.

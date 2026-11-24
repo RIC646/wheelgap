@@ -47,6 +47,7 @@ from .codequality import write_codequality
 from .constraints import write_constraints
 from .deps import Resolver, pinned_complete, resolve_deps
 from .dockerfile import (
+    _PIP_PYLOCK_NAME_RE,
     PASSED_OVER,
     DockerfileError,
     HeredocSyntaxError,
@@ -90,6 +91,7 @@ from .sources import (
     check_report_targets,
     load_inputs,
     parse_dist,
+    parse_named_requirements,
     pyproject_group_names,
     pythons_outside_lock,
     requirement_to_package,
@@ -1475,9 +1477,6 @@ def target_lines(
 
 
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]<>#|~&])")
-# PEP 751 lock names (packaging.pylock.is_valid_pylock_path): pip 26.1 and later install `pip install -r pylock.toml`
-# (or pylock.NAME.toml) as that lock, not as a requirements file.
-_PIP_PYLOCK_NAME_RE = re.compile(r"pylock(?:\.[^.]+)?\.toml")
 
 
 def _md(text: str) -> str:
@@ -1790,7 +1789,7 @@ def note_prefer_binary(sources: list[Source]) -> None:
     wheel than the newest, which is the one checked. A pin isn't affected."""
     for source in sources:
         fc = source.format_control
-        if source.requirements and fc is not None and fc.prefer_binary and unpinned_requirement_names(source):
+        if fc is not None and fc.prefer_binary and unpinned_requirement_names(source):
             print(
                 f"wheelgap: note: {fc.prefer_binary} sets --prefer-binary: for an unpinned requirement pip may take "
                 "an older release that has a wheel, and wheelgap checked the newest",
@@ -1798,17 +1797,27 @@ def note_prefer_binary(sources: list[Source]) -> None:
             )
 
 
+def _option_list(options: list[str]) -> str:
+    return options[0] if len(options) == 1 else f"{', '.join(options[:-1])} and {options[-1]}"
+
+
 def note_index_options(sources: list[Source]) -> None:
     """One note per requirements file that sets an index option pip reads and wheelgap doesn't (Source.index_options):
-    by the option's name only, since its value may hold credentials."""
+    by the option's name only, since its value may hold credentials. Another -r file of the same pip install line
+    that sets one gets a note for this file too, naming the file that sets it."""
     for source in sources:
+        for setter, options in source.line_index_options:
+            print(
+                f"wheelgap: note: {setter} sets {_option_list(options)} for the install that reads {source.label} "
+                f"too, which wheelgap doesn't read: {source.label}'s packages were checked on PyPI only, so a package "
+                "pip finds elsewhere may install differently",
+                file=sys.stderr,
+            )
         if not source.index_options:
             continue
-        options = source.index_options
-        named = options[0] if len(options) == 1 else f"{', '.join(options[:-1])} and {options[-1]}"
         print(
-            f"wheelgap: note: {source.label} sets {named}, which wheelgap doesn't read: its packages were checked on "
-            "PyPI only, so a package pip finds elsewhere may install differently",
+            f"wheelgap: note: {source.label} sets {_option_list(source.index_options)}, which wheelgap doesn't read: "
+            "its packages were checked on PyPI only, so a package pip finds elsewhere may install differently",
             file=sys.stderr,
         )
 
@@ -2274,6 +2283,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         config_inputs = args.inputs
     docker_includes: dict[tuple[int, Path], tuple[Path, ...]] = {}
     docker_constraints: dict[Path, tuple[Path, ...]] = {}
+    docker_line_files: dict[Path, tuple[Path, ...]] = {}  # each file's -r files of its pip install line, in order
     uv_installs: set[tuple[int, Path]] = set()
     image: ImageTarget | None = None
     unknown_image: UnknownImageError | None = None
@@ -2324,6 +2334,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 context=context,
                 includes=docker_includes,
                 constraints=docker_constraints,
+                line_files=docker_line_files,
                 dependencies=args.deps,
                 uv_installs=uv_installs,
                 report=inputs_report,
@@ -2549,15 +2560,22 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         args.environment,
                         requirements_constraints=docker_constraints,
                         file_kinds=docker_kinds,
+                        requirements_line_files=docker_line_files,
                     )
                     if args.inputs
                     else []
                 )
-                for named_line, named_texts, by_uv in inputs_report.named:
-                    named = Source(f"{args.dockerfile}:{named_line}", pypi_only=True)
-                    for text in named_texts:
-                        named.packages.append(requirement_to_package(text, named.label))
-                        named.specs.append(text)
+                for (named_line, named_texts, by_uv), line_files in zip(
+                    inputs_report.named, inputs_report.named_files, strict=True
+                ):
+                    named_label = f"{args.dockerfile}:{named_line}"
+                    if line_files:  # the line's -r files set options for the names too, as pip reads them
+                        named = parse_named_requirements(named_label, named_texts, line_files)
+                    else:
+                        named = Source(named_label, pypi_only=True)
+                        for text in named_texts:
+                            named.packages.append(requirement_to_package(text, named.label))
+                            named.specs.append(text)
                     sources.append(named)
                     if by_uv:
                         uv_named.add(id(named))
@@ -2703,9 +2721,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     "index-url in [tool.wheelgap]) doesn't have"
                 )
             for source in dependency_sources:
-                # A command-line name is PyPI's by definition; a file may point pip elsewhere, where --deps
-                # can't see, so it refuses rather than answer for the wrong index.
-                if not (source.requirements or source.pyproject_extras is not None):
+                # A command-line name is PyPI's by definition, unless the -r files of its Dockerfile install line
+                # set an index option; a file may point pip elsewhere, where --deps can't see, so it refuses rather
+                # than answer for the wrong index.
+                if not (source.requirements or source.pyproject_extras is not None or not source.pypi_only):
                     continue
                 instead = (
                     ", so check its lock (uv lock --script) instead"

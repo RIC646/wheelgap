@@ -2415,9 +2415,17 @@ def _constraint_conflict(pkg: Package, entries: list[Package]) -> str | None:
     return f"{first} conflicts with the constraint {blamed.name}{_specifier(blamed)}"
 
 
-def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> Source:
+def parse_requirements(
+    path: Path, constraint_paths: tuple[Path, ...] = (), line_files: tuple[Path, ...] = ()
+) -> Source:
     """`constraint_paths` are constraints files given beside the file (`pip install -r FILE -c CONSTRAINTS`): pip
-    reads them before FILE, so they count as a `-c CONSTRAINTS` line at the top of it would."""
+    reads them before FILE, so they count as a `-c CONSTRAINTS` line at the top of it would.
+
+    `line_files` are all the -r files of that one install (`pip install -r a.txt -r b.txt`), in the order of the line,
+    FILE among them. pip reads them into one install with one finder (get_requirements in
+    pip/_internal/cli/req_command.py at 26.3), after the constraints files and before it resolves, so the option
+    lines of every file (--no-binary, --only-binary, --pre, an index option) and the -c lines inside them count for
+    FILE's requirements too, in either order. Only FILE's own requirements are the source's packages."""
     constraints: list[Package] = []
     seen: dict[bool, set[Path]] = {False: set(), True: set()}  # requirement files, constraint files
     index_options: list[str] = []
@@ -2442,18 +2450,32 @@ def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> S
                 ignored_options=ignored_options,
             )
         )
-    pkgs.extend(
+    own = Path(os.path.abspath(path))
+    for file in line_files or (path,):
+        if Path(os.path.abspath(file)) == own:
+            pkgs.extend(
+                _read_requirements(
+                    path,
+                    seen,
+                    constraints,
+                    index_options=index_options,
+                    format_control=format_control,
+                    req_lines=req_lines,
+                    compiler_signs=compiler_signs,
+                    ignored_options=ignored_options,
+                )
+            )
+            continue
+        # Another file of the line: its requirements are its own source's, but its options, index options and
+        # constraints are the install's. It gets its own record of requirement files read, so a file both include
+        # still lists its packages in each; the constraints files read are shared, so none is added twice.
         _read_requirements(
-            path,
-            seen,
+            file,
+            {False: set(), True: seen[True]},
             constraints,
             index_options=index_options,
             format_control=format_control,
-            req_lines=req_lines,
-            compiler_signs=compiler_signs,
-            ignored_options=ignored_options,
         )
-    )
     source = _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
     source.ignored_options = list(ignored_options.values())
     return source
@@ -3563,17 +3585,21 @@ def load_file(
     constraint_paths: tuple[Path, ...] = (),
     *,
     kind: str | None = None,
+    line_files: tuple[Path, ...] = (),
 ) -> Source:
     """Read one input file. `environment` picks a pixi.lock environment (default: `default`). `constraint_paths` are
-    the constraints files given beside a requirements file (see parse_requirements). `kind` overrides `file_kind(path)`
-    when the caller already knows the format (for example `pip install -r FILE` in a Dockerfile)."""
+    the constraints files given beside a requirements file, and `line_files` the -r files of its install line (see
+    parse_requirements). `kind` overrides `file_kind(path)` when the caller already knows the format (for example
+    `pip install -r FILE` in a Dockerfile)."""
     kind = kind or file_kind(path)
     if constraint_paths and kind != "requirements":
         raise SourceError(f"{path.name}: constraints files (pip install -c) only apply to a requirements file")
+    if len(line_files) > 1 and kind != "requirements":
+        raise SourceError(f"{path.name}: other -r files of an install line only apply to a requirements file")
     if kind == "pixi":
         source = parse_pixi_lock(path, environment)
-    elif constraint_paths:
-        source = parse_requirements(path, constraint_paths)
+    elif constraint_paths or len(line_files) > 1:
+        source = parse_requirements(path, constraint_paths, line_files)
     else:
         source = READERS[kind](path)
     source.path, source.kind, source.constraint_paths = path, kind, constraint_paths
@@ -4084,11 +4110,13 @@ def load_inputs(
     *,
     requirements_constraints: Mapping[Path, tuple[Path, ...]] | None = None,
     file_kinds: Mapping[Path, str] | None = None,
+    requirements_line_files: Mapping[Path, tuple[Path, ...]] | None = None,
 ) -> list[Source]:
     """Each input is a file, a directory (its input is found by load_directory) or a requirement like 'numpy==2.3.4'.
     `environment` picks the pixi.lock environment; with no pixi.lock input it's an error.
     `requirements_constraints` maps a requirements file among the inputs to the constraints files given beside it
-    (--dockerfile-inputs: `pip install -r FILE -c CONSTRAINTS`).
+    (--dockerfile-inputs: `pip install -r FILE -c CONSTRAINTS`), and `requirements_line_files` to all the -r files of
+    its install line (`pip install -r a.txt -r b.txt`), whose options pip applies to each of them.
     `file_kinds` overrides `file_kind()` for specific files (e.g. `pip install -r` files with any name)."""
     if environment == "":
         raise SourceError("--environment needs a name")
@@ -4101,7 +4129,8 @@ def load_inputs(
         elif p.is_file():
             constraints = requirements_constraints.get(p, ()) if requirements_constraints is not None else ()
             kind = file_kinds.get(p) if file_kinds is not None else None
-            sources.append(load_file(p, environment, constraints, kind=kind))
+            line_files = requirements_line_files.get(p, ()) if requirements_line_files is not None else ()
+            sources.append(load_file(p, environment, constraints, kind=kind, line_files=line_files))
         elif "/" in item or item.endswith((".lock", ".txt", ".toml", ".json", ".in", ".yml", ".yaml")):
             raise SourceError(f"{item}: no such file")
         else:

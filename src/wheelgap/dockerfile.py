@@ -1696,6 +1696,9 @@ def _read_flag_words(rest: list[str], i: int, uv: bool) -> int:
     return 2 if i + 1 < len(rest) and re.fullmatch(values[option], rest[i + 1]) else 0
 
 
+# PEP 751 lock names (packaging.pylock.is_valid_pylock_path): pip 26.1 and later install `pip install -r pylock.toml`
+# (or pylock.NAME.toml) as that lock, not as a requirements file.
+_PIP_PYLOCK_NAME_RE = re.compile(r"pylock(?:\.[^.]+)?\.toml")
 _UV_REQUIREMENTS_SUFFIXES = (".txt", ".in")
 
 
@@ -3117,6 +3120,31 @@ def _pip_install_files(
     return files, constraints, prefer_binary, names, no_deps
 
 
+def _read_with(host: Path, constraint_paths: tuple[Path, ...], line_files: tuple[Path, ...]) -> tuple[object, ...]:
+    """What wheelgap reads from a requirements file installed with these -c and -r files: each requirement's
+    release and the files pip may take for it (and for its dependencies), and whether pip may look beyond PyPI."""
+    source = parse_requirements(host, constraint_paths, line_files)
+    control = source.format_control
+    return (
+        None
+        if control is None
+        else [
+            sorted(control.no_binary),
+            sorted(control.only_binary),
+            sorted(control.all_releases),
+            sorted(control.only_final),
+            control.prefer_binary is not None,
+        ],
+        [
+            (p.key, p.version, p.spec, p.no_binary, p.only_binary, p.prereleases, p.error, p.skip)
+            for p in source.packages
+        ],
+        source.pypi_only,
+        source.index_options,
+        source.deps_blockers,
+    )
+
+
 def dockerfile_requirements(
     path: Path,
     build_args: Mapping[str, str] | None = None,
@@ -3128,6 +3156,7 @@ def dockerfile_requirements(
     uv_installs: set[tuple[int, Path]] | None = None,
     report: InputsReport | None = None,
     pythons: Sequence[str] | None = None,
+    line_files: dict[Path, tuple[Path, ...]] | None = None,
 ) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `pip install -r FILE` the RUN lines of the Dockerfile's final stage run.
 
@@ -3142,7 +3171,9 @@ def dockerfile_requirements(
     list, a pip config file, a final stage built on an earlier stage, and a `# syntax=` frontend other than
     docker/dockerfile.
 
-    `constraints`, if given, is filled with each requirements file's `-c` files, to pass to load_inputs;
+    `constraints`, if given, is filled with each requirements file's `-c` files, to pass to load_inputs, and
+    `line_files` with all the `-r` files of its install line, in order (pip reads them into one install, so the
+    option lines of each count for all: parse_requirements);
     `dependencies` says the check will follow dependencies (--deps), which --prefer-binary then can't be read for.
     The Docker ignore file is read (dockerignore.context_rules): a file its rules leave out of the build
     context, whether FILE or one it includes, is a DockerfileError naming the rule, and is never read. A -r or -c
@@ -3178,6 +3209,7 @@ def dockerfile_requirements(
             uv_installs=uv_installs,
             report=report,
             pythons=tuple(pythons) if pythons is not None else None,
+            line_files=line_files,
         )
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
@@ -3199,6 +3231,7 @@ def _dockerfile_requirements(
     uv_installs: set[tuple[int, Path]] | None = None,
     report: InputsReport | None = None,
     pythons: tuple[str, ...] | None = None,
+    line_files: dict[Path, tuple[Path, ...]] | None = None,
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
     try:
@@ -3268,6 +3301,7 @@ def _dockerfile_requirements(
     copies: list[_Copy] = []
     found: dict[Path, int] = {}
     used_constraints: dict[Path, tuple[Path, ...]] = {}
+    used_line_files: dict[Path, tuple[Path, ...]] = {}
     installed_by_uv: dict[Path, bool] = {}
 
     def copied_requirements(file: str, option: str, uv: bool, install: _Install) -> Path:
@@ -3442,13 +3476,27 @@ def _dockerfile_requirements(
         constraint_paths = tuple(copied_requirements(file, "-c", uv, install) for file in install.constraints)
         if constraint_paths and constraints is None:  # never read the requirements without their constraints
             raise DockerfileError(f"line {number}: pip install -c FILE isn't read here")
-        for file in install.files:
-            host = copied_requirements(file, "-r", uv, install)
-            # Read as load_inputs will read it: with the line's -c files, and through every include, so a
-            # requirement in an included file (or in a -r inside a constraints file) counts, and a requirement
-            # that only a constraint pins with == counts as pinned.
+        hosts = tuple(copied_requirements(file, "-r", uv, install) for file in install.files)
+        if len(hosts) > 1:
+            # pip reads every -r file of the line into one install, so each file's option lines count for the
+            # others' requirements: never read one file without the rest.
+            if line_files is None:
+                raise DockerfileError(f"line {number}: pip install with more than one -r FILE isn't read here")
+            if not uv and (lock := next((host for host in hosts if _PIP_PYLOCK_NAME_RE.fullmatch(host.name)), None)):
+                # pip picks a lock's files with the --no-binary and --only-binary of the line's requirements files,
+                # in either order (pip 26.3: "No binaries permitted for fastlib"), which the pylock.toml reader
+                # doesn't follow.
+                raise DockerfileError(
+                    f"line {number}: pip install -r {lock.name} with other -r files: pip picks the lock's files "
+                    "with the options of the line's requirements files, which --dockerfile-inputs doesn't read: "
+                    "install the lock on a line of its own"
+                )
+        for host in hosts:
+            # Read as load_inputs will read it: with the line's -c files and its other -r files, and through every
+            # include, so a requirement in an included file (or in a -r inside a constraints file) counts, and a
+            # requirement that only a constraint pins with == counts as pinned.
             unpinned = (
-                [p for p in parse_requirements(host, constraint_paths).packages if not p.version]
+                [p for p in parse_requirements(host, constraint_paths, hosts).packages if not p.version]
                 if (install.prefer_binary or uv) and not dependencies
                 else []
             )
@@ -3479,6 +3527,19 @@ def _dockerfile_requirements(
                     f"line {number}: {host.name} is installed again with other -c files than on line "
                     f"{found[host]}, which --dockerfile-inputs doesn't read"
                 )
+            if (
+                host in found
+                and used_line_files[host] != hosts
+                and _read_with(host, constraint_paths, used_line_files[host])
+                != _read_with(host, constraint_paths, hosts)
+            ):
+                # The other -r files' options change what pip picks for this file's requirements, and wheelgap
+                # checks each file once.
+                raise DockerfileError(
+                    f"line {number}: {host.name} is installed again with other -r files than on line "
+                    f"{found[host]}, whose option lines change what pip picks for it, which --dockerfile-inputs "
+                    "doesn't read"
+                )
             if host in found and installed_by_uv[host] != uv:
                 raise DockerfileError(
                     f"line {number}: {host.name} is installed by pip on one line and by uv on another (line "
@@ -3490,6 +3551,7 @@ def _dockerfile_requirements(
                 uv_installs.add((number, host))
             installed_by_uv[host] = uv
             used_constraints[host] = constraint_paths
+            used_line_files.setdefault(host, hosts)
             found.setdefault(host, number)
         for glob in install.globs:
             check_glob(glob, install)
@@ -3714,4 +3776,6 @@ def _dockerfile_requirements(
         )
     if constraints is not None:
         constraints.update(used_constraints)
+    if line_files is not None:
+        line_files.update(used_line_files)
     return [(number, host) for host, number in found.items()]

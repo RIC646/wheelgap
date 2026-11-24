@@ -162,6 +162,12 @@ dependencies), and:
 - `-c FILE` / `--constraint FILE`: the constraints file is followed back through `WORKDIR` and `COPY` like `-r FILE`,
   with the same refusals, and applied to the line's requirements files as a `-c FILE` line at the top of each would
   be (the note on stderr names it too). A requirements file installed twice with different `-c` files is an error;
+- several `-r FILE`s on one line (`pip install -r a.txt -r b.txt`): pip reads them as one install, with one set of
+  options, so an option line in one file (`--no-binary :all:`, `--only-binary`, `--pre`, an index option) and a `-c`
+  line inside it count for the requirements of every file of the line, whichever comes first, as they do for pip.
+  Each file is still its own input in the report, labelled with the line. A file installed again on another line
+  with other `-r` files whose options change what pip picks for it is an error, and so is a `pylock.toml` beside a
+  requirements file on one `pip install` line (pip picks the lock's files with the requirements files' options);
 - `--prefer-binary`, only when every requirement the line installs is pinned with `==` (in `FILE`, in the files it
   includes, and in a `-r` inside a `-c` file; a requirement that a constraint pins with `==` counts) and `--deps`
   isn't used: otherwise pip may take an older release that has a wheel over a newer one that has none, while wheelgap

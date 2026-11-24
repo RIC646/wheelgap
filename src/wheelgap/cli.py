@@ -47,6 +47,7 @@ from .codequality import write_codequality
 from .constraints import write_constraints
 from .deps import Resolver, pinned_complete, resolve_deps
 from .dockerfile import (
+    _PIP_PYLOCK_NAME_RE,
     PASSED_OVER,
     DockerfileError,
     HeredocSyntaxError,
@@ -1475,9 +1476,6 @@ def target_lines(
 
 
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]<>#|~&])")
-# PEP 751 lock names (packaging.pylock.is_valid_pylock_path): pip 26.1 and later install `pip install -r pylock.toml`
-# (or pylock.NAME.toml) as that lock, not as a requirements file.
-_PIP_PYLOCK_NAME_RE = re.compile(r"pylock(?:\.[^.]+)?\.toml")
 
 
 def _md(text: str) -> str:
@@ -2274,6 +2272,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         config_inputs = args.inputs
     docker_includes: dict[tuple[int, Path], tuple[Path, ...]] = {}
     docker_constraints: dict[Path, tuple[Path, ...]] = {}
+    docker_line_files: dict[Path, tuple[Path, ...]] = {}  # each file's -r files of its pip install line, in order
     uv_installs: set[tuple[int, Path]] = set()
     image: ImageTarget | None = None
     unknown_image: UnknownImageError | None = None
@@ -2324,6 +2323,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 context=context,
                 includes=docker_includes,
                 constraints=docker_constraints,
+                line_files=docker_line_files,
                 dependencies=args.deps,
                 uv_installs=uv_installs,
                 report=inputs_report,
@@ -2549,6 +2549,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         args.environment,
                         requirements_constraints=docker_constraints,
                         file_kinds=docker_kinds,
+                        requirements_line_files=docker_line_files,
                     )
                     if args.inputs
                     else []

@@ -1138,7 +1138,7 @@ def _context(tmp_path, dockerfile, files=("requirements.txt",)):
 )
 def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
     path = _context(tmp_path, dockerfile, files)
-    assert dockerfile_requirements(path) == [(line, tmp_path / name) for line, name in expected]
+    assert dockerfile_requirements(path, line_files={}) == [(line, tmp_path / name) for line, name in expected]
 
 
 @pytest.mark.parametrize(
@@ -1952,7 +1952,7 @@ def test_dockerfile_requirements_never_drops_install_constraints(tmp_path):
     with pytest.raises(DockerfileError, match=":4: pip install -c FILE isn't read here"):
         dockerfile_requirements(path)
     found: dict = {}
-    assert dockerfile_requirements(path, constraints=found) == [
+    assert dockerfile_requirements(path, constraints=found, line_files={}) == [
         (4, tmp_path / "requirements.txt"),
         (5, tmp_path / "dev.txt"),
     ]
@@ -2006,6 +2006,124 @@ def test_cli_dockerfile_inputs_applies_install_constraints(tmp_path, capsys, fak
     assert main([str(requirements), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
     assert actual == json.loads(capsys.readouterr().out)["packages"]
     assert actual[0]["version"] == "3.1"
+
+
+_ONE_LINE = "FROM python:3.13\nWORKDIR /app\nCOPY a.txt b.txt c.txt ./\nRUN pip install {}\n"
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "run", "expected"),
+    [
+        # #701: pip reads every -r file of one install with one finder, so an option line in one file counts for the
+        # requirements of the others, whichever comes first on the line (pip 26.3, --no-index -f with tiny wheels).
+        ("--no-binary :all:\n", "fastlib==2.0.0\n", "-r a.txt -r b.txt", {"fastlib": ("2.0.0", "source")}),
+        ("--no-binary :all:\n", "fastlib==2.0.0\n", "-r b.txt -r a.txt", {"fastlib": ("2.0.0", "source")}),
+        ("--only-binary :all:\n", "nowheels==0.9\n", "-r a.txt -r b.txt", {"nowheels": ("0.9", "missing")}),
+        ("--only-binary :all:\n", "nowheels==0.9\n", "-r b.txt -r a.txt", {"nowheels": ("0.9", "missing")}),
+        ("--pre\n", "prelib>=0.5\n", "-r a.txt -r b.txt", {"prelib": ("2.0rc1", "source")}),
+        ("--pre\n", "prelib>=0.5\n", "-r b.txt -r a.txt", {"prelib": ("2.0rc1", "source")}),
+        # The last option pip reads wins, across the files as within one.
+        (
+            "--only-binary :all:\nfastlib==2.0.0\n",
+            "--no-binary :all:\n",
+            "-r a.txt -r b.txt",
+            {"fastlib": ("2.0.0", "source")},
+        ),
+        (
+            "--no-binary :all:\nfastlib==2.0.0\n",
+            "--only-binary :all:\n",
+            "-r a.txt -r b.txt",
+            {"fastlib": ("2.0.0", "wheel")},
+        ),
+        # A -c line inside one file constrains the others' requirements too (pip and uv 0.13.1 alike).
+        ("-c c.txt\n", "ranged\n", "-r a.txt -r b.txt", {"ranged": ("1.9", "source")}),
+        ("-c c.txt\n", "ranged\n", "-r b.txt -r a.txt", {"ranged": ("1.9", "source")}),
+        # The line's own -c file's options reach every -r file.
+        ("purewheel==3.1\n", "fastlib==2.0.0\n", "-c c.txt -r a.txt -r b.txt", None),
+        # A file with no option lines: the same answer as before.
+        (
+            "purewheel==3.1\n",
+            "fastlib==2.0.0\n",
+            "-r a.txt -r b.txt",
+            {"purewheel": ("3.1", "wheel"), "fastlib": ("2.0.0", "wheel")},
+        ),
+    ],
+)
+def test_cli_dockerfile_inputs_reads_the_files_of_one_line_as_one_install(
+    tmp_path, capsys, fake_pypi, a, b, run, expected
+):
+    path = _context(tmp_path, _ONE_LINE.format(run), ["a.txt", "b.txt", "c.txt"])
+    (tmp_path / "a.txt").write_text(a, encoding="utf-8")
+    (tmp_path / "b.txt").write_text(b, encoding="utf-8")
+    if expected is None:
+        (tmp_path / "c.txt").write_text("--no-binary :all:\n", encoding="utf-8")
+        expected = {"purewheel": ("3.1", "missing"), "fastlib": ("2.0.0", "source")}
+    else:
+        (tmp_path / "c.txt").write_text("ranged==1.9\n", encoding="utf-8")
+    main(["--dockerfile", str(path), "--dockerfile-inputs", "--json", "--no-cache"])
+    packages = json.loads(capsys.readouterr().out)["packages"]
+    assert {p["name"]: (p["version"], p["results"]["linux-x86_64"]) for p in packages} == expected
+
+
+def test_cli_dockerfile_inputs_notes_an_index_option_of_another_file_of_the_line(tmp_path, capsys, fake_pypi):
+    # pip 26.3 finds b.txt's package through a -f line in a.txt (`pip install --no-index -r a.txt -r b.txt`).
+    path = _context(tmp_path, _ONE_LINE.format("-r a.txt -r b.txt"), ["a.txt", "b.txt", "c.txt"])
+    (tmp_path / "a.txt").write_text("--extra-index-url https://example.test/simple\n", encoding="utf-8")
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--no-cache"]) == 0
+    assert "note: b.txt sets --extra-index-url, which wheelgap doesn't read" in capsys.readouterr().err
+
+
+def test_dockerfile_requirements_reads_the_files_of_one_line_together(tmp_path):
+    path = _context(tmp_path, _ONE_LINE.format("-r a.txt -r b.txt"), ["a.txt", "b.txt", "c.txt"])
+    # A caller that doesn't take the line's other -r files would read each file without the others' options.
+    with pytest.raises(DockerfileError, match=":4: pip install with more than one -r FILE isn't read here"):
+        dockerfile_requirements(path)
+    found: dict = {}
+    assert dockerfile_requirements(path, line_files=found) == [(4, tmp_path / "a.txt"), (4, tmp_path / "b.txt")]
+    assert found == {
+        name: (tmp_path / "a.txt", tmp_path / "b.txt") for name in (tmp_path / "a.txt", tmp_path / "b.txt")
+    }
+    a_txt, b_txt = tmp_path / "a.txt", tmp_path / "b.txt"
+    a_txt.write_text("--no-binary :all:\n", encoding="utf-8")
+    (source,) = load_inputs([str(b_txt)], requirements_line_files={b_txt: (a_txt, b_txt)})
+    assert [(p.name, p.no_binary) for p in source.packages] == [("purewheel", True)]
+    (source,) = load_inputs([str(b_txt)])
+    assert [(p.name, p.no_binary) for p in source.packages] == [("purewheel", False)]
+
+
+@pytest.mark.parametrize(
+    ("a", "message"),
+    [
+        # b.txt was read alone on line 4; on line 5 a.txt's --pre changes what pip picks for it.
+        ("--pre\n", ":5: b.txt is installed again with other -r files than on line 4, whose option lines change"),
+        ("purewheel==3.1\n", None),  # a.txt changes nothing for b.txt: read once, as before
+    ],
+)
+def test_dockerfile_requirements_refuses_a_file_read_again_with_other_options(tmp_path, a, message):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY a.txt b.txt ./\nRUN pip install -r b.txt\n"
+        "RUN pip install -r a.txt -r b.txt\n",
+        ["a.txt", "b.txt"],
+    )
+    (tmp_path / "a.txt").write_text(a, encoding="utf-8")
+    (tmp_path / "b.txt").write_text("prelib>=0.5\n", encoding="utf-8")
+    if message is None:
+        assert dockerfile_requirements(path, line_files={}) == [(4, tmp_path / "b.txt"), (5, tmp_path / "a.txt")]
+    else:
+        with pytest.raises(DockerfileError, match=message):
+            dockerfile_requirements(path, line_files={})
+
+
+def test_dockerfile_requirements_refuses_a_lock_beside_other_files_on_a_pip_line(tmp_path):
+    # pip 26.3 picks the lock's files with the --no-binary of the line's requirements files, in either order.
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY a.txt pylock.toml ./\nRUN pip install -r a.txt -r pylock.toml\n",
+        ["a.txt", "pylock.toml"],
+    )
+    with pytest.raises(DockerfileError, match=r":4: pip install -r pylock.toml with other -r files: pip picks"):
+        dockerfile_requirements(path, line_files={})
 
 
 def test_dockerfile_install_constraint_file_includes_are_verified(tmp_path, capsys, fake_pypi):
@@ -5056,5 +5174,5 @@ def test_dockerfile_requirements_reads_exact_case_copy_paths(tmp_path):
         encoding="utf-8",
     )
 
-    inputs = dockerfile_requirements(dockerfile)
+    inputs = dockerfile_requirements(dockerfile, line_files={})
     assert [req_path.name for _, req_path in inputs] == ["requirements.txt", "base.txt"]

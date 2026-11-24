@@ -477,7 +477,9 @@ TOOLS: list[dict[str, Any]] = [
             "Pass the old lockfile as 'old' under its own file name, since the name says how to read it: e.g. `mkdir -p"
             " /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock` (this works after the upgrade too, until it's "
             "committed). Unlike `wheelgap diff`, the project's [tool.wheelgap] settings don't apply: pass python, "
-            "targets and any version floors that differ from the defaults. " + _STATUS_HELP
+            "targets and any version floors that differ from the defaults. As in `wheelgap diff`, an index-url in "
+            "the [tool.wheelgap] beside either lockfile is a tool error, before any lookup: this tool checks PyPI "
+            "only, so check each lockfile with check_lockfile, which uses that index. " + _STATUS_HELP
         ),
         "inputSchema": {
             "type": "object",
@@ -945,6 +947,13 @@ def _diff_lockfiles(args: dict[str, Any]) -> dict[str, Any]:
         targets = make_targets(_pythons(args) or None, _platforms(args) or None, **_versions(args))
     except TargetError as e:
         raise ToolError(str(e)) from e
+    for path in paths:
+        # As `wheelgap diff` (#705), before any lookup: an index-url in [tool.wheelgap] beside either side would be
+        # ignored, and PyPI's answer given for a project that installs from that index (#710). The URL isn't named.
+        try:
+            diff._input_index_url(str(path), str(path))
+        except SourceError as e:
+            raise ToolError(_translate_cli_message(str(e))) from e
     if not _platforms(args):  # as `wheelgap diff`: without the default platforms both locks leave out
         targets = diff.lock_default_targets(paths, targets)[0]
     sides = []
@@ -1059,6 +1068,12 @@ _CLI_ADVICE = {
     "To use a simple index, pass --index-url instead.": (
         "To use a simple index, set index-url in [tool.wheelgap] (a URL without credentials) for the tools that "
         "check a project's files."
+    ),
+    # wheelgap diff's refusal of [tool.wheelgap] index-url (diff._refuse_index_url), which diff_lockfiles shares.
+    "which wheelgap diff doesn't read yet, so it would check PyPI instead of that index; check each lockfile with "
+    "wheelgap instead, which uses it": (
+        "which diff_lockfiles doesn't read yet, so it would check PyPI instead of that index; check each lockfile "
+        "with check_lockfile instead, which uses it"
     ),
     "select targets with -t": "pass targets explicitly",
     "add it to -t as well": "include it in targets as well",

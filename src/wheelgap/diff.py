@@ -13,8 +13,8 @@ How statuses rank, per target:
 - `unknown` (the package couldn't be checked) isn't on that scale, because it says nothing about what pip
   would do. So a change is never called "not worse" on a guess: anything → `unknown` is worse, and
   `unknown` → `source` or `missing` is worse too. Only `unknown` → `wheel`, `bundled` or `n/a` is not.
-  `unknown` on both sides counts as worse if the version changed; at the same version it's unchanged, and a
-  note on stderr names those packages.
+  `unknown` on both sides is unchanged, at the same version or another (neither side was checked, as for
+  skipped below), and a note on stderr names those packages.
 - A package installed from somewhere wheelgap doesn't check (git, a path, a URL, an editable install or a
   private index) is "skipped" on that target and treated like `unknown`: anything → skipped is worse, and
   skipped → `source` or `missing` is too. Skipped on both sides is unchanged. A new skipped package counts as
@@ -47,6 +47,7 @@ from .api import Result, _check_lockfile, check_packages, make_targets, running_
 from .check import CELL, Row, Status, applies, lock_environments_note, narrow_to_lock_environments, reachable
 from .cli import find_pyproject, libc_versions, load_config, load_uv_targets, project_dir, read_python_version
 from .logsafe import guarded_output
+from .pypi import check_index_url
 from .sources import Source, SourceError, file_kind, find_lockfile, parse_uv_lock
 from .targets import (
     DEFAULT_ANDROID_API,
@@ -153,8 +154,6 @@ def worse_on(was: Package, now: Package, t: Target) -> bool:
         return t not in was.skips  # skipped on both sides: neither was checked, so nothing changed
     if t in was.skips:
         return now.statuses[t] in GAPS  # like unknown → a status
-    if was.statuses[t] is Status.UNKNOWN and now.statuses[t] is Status.UNKNOWN:
-        return was.version != now.version  # a new release may have lost a wheel
     return worse(was.statuses[t], now.statuses[t])
 
 
@@ -200,8 +199,8 @@ def _with_direct(pkg: Package, targets: list[Target]) -> str:
 
 
 def compare(before: dict[str, Package], after: dict[str, Package], targets: list[Target]) -> Report:
-    """Packages that got worse and new packages with gaps, with the names that couldn't be checked at the
-    same version on either side."""
+    """Packages that got worse and new packages with gaps, with the names that couldn't be checked on either
+    side."""
     multi_py = len({t.python for t in targets}) > 1
     report = Report()
     for key, pkg in after.items():
@@ -431,6 +430,24 @@ def lock_default_targets(paths: list[Path], targets: list[Target]) -> tuple[list
     return narrowed, lock_environments_note(sources, left_out, narrowed, "default targets") if left_out else None
 
 
+# The main command's way to a simple index, which diff doesn't have.
+_SIMPLE_ADVICE = "To use a simple index, pass --index-url instead."
+
+
+def _check_index_url() -> None:
+    """pypi.check_index_url's error, with advice diff can follow: it has no --index-url."""
+    try:
+        check_index_url()
+    except SourceError as e:
+        raise SourceError(
+            str(e).replace(
+                _SIMPLE_ADVICE,
+                "wheelgap diff can't use a simple index (it has no --index-url): check each lockfile with "
+                "wheelgap --index-url instead.",
+            )
+        ) from None
+
+
 def _main(argv: list[str] | None, prog: str) -> int:
     p = argparse.ArgumentParser(prog=prog, description=__doc__.splitlines()[0])
     p.add_argument(
@@ -474,6 +491,8 @@ def _main(argv: list[str] | None, prog: str) -> int:
     )
     args = p.parse_args(argv)
     try:
+        # As in the main command, before any lookup: a /simple URL there would make every package `unknown`.
+        _check_index_url()
         config_inputs = _config_inputs(args.new, deps=args.deps)
         pyproject = find_pyproject(config_inputs)
         config = load_config(pyproject) if pyproject else {}

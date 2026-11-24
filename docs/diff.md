@@ -10,6 +10,11 @@ wheelgap diff origin/main:uv.lock uv.lock -p 3.13 -t linux-aarch64   # the base 
 
 It exits `1` if there are any, `0` if not, and `2` on bad input. `python -m wheelgap.diff OLD NEW` works the same way.
 
+Packages are looked up on PyPI, or on the JSON API mirror in `WHEELGAP_INDEX_URL`. As in the main command, a
+`WHEELGAP_INDEX_URL` ending in `/simple` is refused before any lookup (exit 2), since it isn't a JSON API (0.13.0 looked
+every package up there, so all were `unknown`). `wheelgap diff` has no `--index-url` for a simple index yet; check
+each lockfile with `wheelgap --index-url` instead.
+
 ## Comparing two package versions
 
 To compare a package's whole dependency tree between two releases without a lockfile, give two pinned specs and
@@ -57,8 +62,9 @@ Both lockfiles are checked and packages are matched by name. Per target:
   than `source`. So `✓ → ● source` and `● source → ✗ missing` are worse.
 - `unknown` (the package couldn't be checked) isn't on that scale, because it says nothing about what pip would do.
   Anything → `unknown` is worse, and `unknown` → `source` or `missing` is worse too; only `unknown` → `wheel`,
-  `bundled` or `n/a` is not. `unknown` on both sides counts as worse if the version changed; at the same version it's
-  unchanged, and a note on stderr names those packages.
+  `bundled` or `n/a` is not. `unknown` on both sides is unchanged, whether or not the version changed (neither side
+  was checked, as for a package skipped on both sides), and a note on stderr names those packages. 0.13.0 counted it
+  as worse when the version changed.
 - A package installed from somewhere wheelgap doesn't check (git, a path, a URL, an editable install or a private
   index) is "skipped" on that target and treated like `unknown`. Skipped on both sides is unchanged. A new skipped
   package counts as a new gap, except a uv `virtual` project, which installs nothing.
@@ -92,8 +98,8 @@ it at that ref, if any), so its format is detected and read as usual. `PATH` is 
   has a gap;
 - `direct` (on `worse` and `new` entries, only when known): per target label, the direct dependencies that bring the
   package in; absent for a direct dependency or an input without a dependency graph;
-- `unchecked`: the names of packages that were `unknown` on both sides of a target at the same version, so neither
-  side could be checked there;
+- `unchecked`: the names of packages that were `unknown` on both sides of a target, so neither side could be checked
+  there (0.13.0 listed them only at the same version, and counted the others as `worse`);
 - `summary`: the `worse` and `new` counts.
 
 A skipped cell has the status `skipped` and a reason: `skip_reason` in `new`, and `old_skip_reason` or

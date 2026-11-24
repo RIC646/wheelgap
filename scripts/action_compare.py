@@ -196,7 +196,7 @@ def report(
         names = ", ".join(code(n) for n in unchecked[:MAX_UNCHECKED])
         if len(unchecked) > MAX_UNCHECKED:
             names += f" and {len(unchecked) - MAX_UNCHECKED} more"
-        footer = ["", f"<p>Couldn't check at the same version on either side: {names}</p>", ""]
+        footer = ["", f"<p>Couldn't check on either side: {names}</p>", ""]
     table = rows(data)
     if not table:
         return "\n".join(header + footer)

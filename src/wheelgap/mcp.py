@@ -472,7 +472,7 @@ TOOLS: list[dict[str, Any]] = [
             "OLD NEW --json` does, and report what got worse: 'worse' lists packages whose status dropped on a target "
             "(e.g. wheel → source after a version bump), 'new' lists added packages with a gap, and 'ok' is true only "
             "when both are empty. A package that can no longer be checked (unknown, or now from git, a path, a URL or a"
-            " private index) counts as worse; 'unchecked' names packages unknown on both sides at the same version. "
+            " private index) counts as worse; 'unchecked' names packages unknown on both sides, which isn't worse. "
             "Pass the old lockfile as 'old' under its own file name, since the name says how to read it: e.g. `mkdir -p"
             " /tmp/old && git show HEAD:uv.lock > /tmp/old/uv.lock` (this works after the upgrade too, until it's "
             "committed). Unlike `wheelgap diff`, the project's [tool.wheelgap] settings don't apply: pass python, "

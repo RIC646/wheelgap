@@ -8,7 +8,7 @@ from conftest import FAKE_INDEX
 
 from wheelgap.api import Result, make_targets
 from wheelgap.check import Status
-from wheelgap.diff import compare, git_ref_input, main, merge, worse
+from wheelgap.diff import Package, compare, git_ref_input, main, merge, worse, worse_on
 
 TARGET = ["-p", "3.13", "-t", "linux-x86_64"]
 TWO_TARGETS = ["-p", "3.13", "-t", "linux-x86_64", "-t", "win-amd64"]
@@ -227,16 +227,51 @@ def test_diff_notes_packages_unknown_on_both_sides(fake_pypi, tmp_path, capsys):
     assert "couldn't check does-not-exist in either lockfile" in err
 
 
-def test_diff_counts_unknown_at_a_new_version_as_worse(fake_pypi, tmp_path, capsys):
-    old, new = write_pair(tmp_path, "does-not-exist==1.0\n", "does-not-exist==2.0\n")
-    assert main([old, new, *TARGET]) == 1
+def test_diff_unknown_on_both_sides_at_a_new_version_is_unchanged(fake_pypi, tmp_path, capsys):
+    # Neither side was checked, as for a package skipped on both sides: "got worse" would fail a CI gate on nothing.
+    old, new = write_pair(tmp_path, "does-not-exist==1.0\npurewheel==3.1\n", "does-not-exist==2.0\npurewheel==3.1\n")
+    assert main([old, new, *TARGET]) == 0
     out, err = capsys.readouterr()
-    assert out.splitlines() == [
-        "does-not-exist 1.0 → 2.0",
-        "  linux-x86_64: ? unknown → ? unknown",
-        "1 package got worse.",
-    ]
-    assert "couldn't check" not in err
+    assert out.splitlines() == ["Nothing got worse."]
+    assert "couldn't check does-not-exist in either lockfile" in err
+    assert main([old, new, *TARGET, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["worse"] == [] and data["unchecked"] == ["does-not-exist"]
+
+
+@pytest.mark.parametrize("index", ["https://pypi.org/simple", "https://mirror.example.com/simple/"])
+@pytest.mark.parametrize(
+    "pair, flags",
+    [
+        (("ranged==1.5\n", "ranged==1.9\n"), []),
+        (("ranged==1.5\n", "ranged==1.9\n"), ["--json"]),
+        (None, ["--deps"]),
+    ],
+)
+def test_diff_refuses_a_simple_wheelgap_index_url_before_any_lookup(
+    fake_pypi, tmp_path, capsys, monkeypatch, index, pair, flags
+):
+    from wheelgap.cli import main as cli_main
+
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", index)
+    assert cli_main(["purewheel==3.1", *TARGET]) == 2
+    main_error = capsys.readouterr().err.strip().splitlines()[-1]
+    error, _ = main_error.removeprefix("wheelgap: error: ").split(" To use a simple index", 1)
+    old, new = write_pair(tmp_path, *pair) if pair else ("ranged==1.5", "ranged==1.9")
+    assert main([old, new, *TARGET, *flags]) == 2
+    out, err = capsys.readouterr()
+    assert fake_pypi == []
+    # The main command's error and JSON API advice; its --index-url advice is for a flag diff doesn't have.
+    message = (
+        f"{error} wheelgap diff can't use a simple index (it has no --index-url): "
+        "check each lockfile with wheelgap --index-url instead."
+    )
+    assert error.startswith("WHEELGAP_INDEX_URL points at a simple index") and "JSON API" in error
+    assert err == f"wheelgap: error: SourceError: {message}\n"
+    if "--json" in flags:
+        assert json.loads(out)["error"] == {"message": message, "type": "SourceError"}
+    else:
+        assert out == ""
 
 
 def test_diff_counts_a_package_now_installed_from_git_as_worse(fake_pypi, tmp_path, capsys):
@@ -406,6 +441,33 @@ def test_merge_takes_the_worst_status_per_target(statuses, expected):
 )
 def test_worse(old, new, expected):
     assert worse(old, new) is expected
+
+
+STATUSES = [Status.WHEEL, Status.BUNDLED, Status.NOT_NEEDED, Status.SOURCE, Status.MISSING, Status.UNKNOWN, "skipped"]
+# Every (old, new) pair that counts as worse, at the same version or another: the rest don't.
+WORSE_PAIRS = {
+    *((old, new) for old in (Status.WHEEL, Status.BUNDLED, Status.NOT_NEEDED) for new in STATUSES[3:]),
+    *((Status.SOURCE, new) for new in STATUSES[4:]),
+    (Status.MISSING, Status.UNKNOWN),
+    (Status.MISSING, "skipped"),
+    *((old, new) for old in (Status.UNKNOWN, "skipped") for new in (Status.SOURCE, Status.MISSING)),
+    (Status.UNKNOWN, "skipped"),
+    ("skipped", Status.UNKNOWN),
+}
+
+
+@pytest.mark.parametrize("new_version", ["1.0", "2.0"])
+@pytest.mark.parametrize("new", STATUSES, ids=str)
+@pytest.mark.parametrize("old", STATUSES, ids=str)
+def test_worse_on_every_pair(old, new, new_version):
+    (t,) = make_targets("3.13", "linux-x86_64")
+
+    def package(status, version):
+        if status == "skipped":
+            return Package("x", [version], {t: Status.NOT_NEEDED}, skips={t: "git"})
+        return Package("x", [version], {t: status})
+
+    assert worse_on(package(old, "1.0"), package(new, new_version), t) is ((old, new) in WORSE_PAIRS)
 
 
 @pytest.mark.parametrize(

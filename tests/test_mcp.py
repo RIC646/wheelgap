@@ -2826,6 +2826,28 @@ def test_diff_lockfiles_looks_requirements_up(fake_pypi, tmp_path):
     assert fake_pypi
 
 
+@pytest.mark.parametrize("side", ["old", "new"])
+def test_diff_lockfiles_refuses_an_index_url_beside_either_lockfile(fake_pypi, tmp_path, capsys, side):
+    # #710: wheelgap diff refuses it since #705; the tool answered ok from PyPI for a project on a private index.
+    from wheelgap import diff
+
+    old, new = lockfile_pair(tmp_path, uv_package("ranged", "1.9", "sdist"), uv_package("ranged", "1.9", "sdist"))
+    url = "https://user:secret@private.example/simple"
+    (tmp_path / side / "pyproject.toml").write_text(f'[tool.wheelgap]\nindex-url = "{url}"\n', encoding="utf-8")
+    (_, reply) = run(init(), call("diff_lockfiles", old=old, new=new, python="3.13", targets=["linux-x86_64"]))
+    assert reply["result"]["isError"] is True
+    text = reply["result"]["content"][0]["text"]
+    lock = old if side == "old" else new
+    assert text == (
+        f"the pyproject.toml beside {lock} sets index-url in [tool.wheelgap], which diff_lockfiles doesn't read yet, "
+        "so it would check PyPI instead of that index; check each lockfile with check_lockfile instead, which uses it"
+    )
+    assert "private.example" not in text and "secret" not in text
+    assert not fake_pypi  # refused before any lookup
+    assert diff.main([old, new, "-p", "3.13", "-t", "linux-x86_64"]) == 2  # as wheelgap diff
+    assert "sets index-url in [tool.wheelgap], which wheelgap diff doesn't read yet" in capsys.readouterr().err
+
+
 def test_diff_lockfiles_malformed_lockfile_is_a_tool_error(fake_pypi, tmp_path):
     old, new = lockfile_pair(tmp_path, uv_package("purewheel", "3.1"), uv_package("purewheel", "3.1"))
     Path(new).write_text("[[package\n", encoding="utf-8")

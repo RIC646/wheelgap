@@ -211,8 +211,8 @@ leaving the argument out. Other inputs (requirements files, `Pipfile.lock`, `pyl
 With `inputs: true` the tool answers "will this image build without compiling anything?" in one call, as
 `wheelgap --dockerfile DOCKERFILE --dockerfile-inputs --json` does: it checks the requirements files the final
 stage installs, on the image's Python and platform. `path` in the result is then the build context, and `notes`
-names each file read and its line (`Dockerfile:4: RUN pip install -r reads requirements.txt`), as
-`dockerfile_inputs` lists them, one entry per file, as `--json` does. Each `dockerfile_inputs` entry
+names each file read and its line (`Dockerfile:4: RUN pip install -r reads requirements.txt`).
+`dockerfile_inputs` has one entry per file read, with its line, as in `--json`. Each entry
 also lists its `constraints` (`-c` files) and `includes` (the files it includes with `-r` or `-c`). A line wheelgap
 can't see into after the last install it reads (a script, `make`) is in `dockerfile_warnings` (and in `notes`, as
 `warning: Dockerfile:6: …`), and `summary.complete` is then `false`: `ok` and `passes` cover the packages read, not

@@ -1243,6 +1243,9 @@ def _run_cli(
         # The command line's verdict: gaps on advisory targets (and, with fail-on = "missing", source builds) don't
         # fail it, so this can be true while ok is false.
         "passes": code == 0,
+        # --dockerfile-inputs: whether the answer covers every line, next to the verdict it qualifies, so an agent
+        # reading passes sees it.
+        **({"summary": {"complete": data["summary"]["complete"]}} if "complete" in data["summary"] else {}),
         "advisory": advisory,
         "unknown": sum(1 for g in gaps if Status.UNKNOWN.value in g["results"].values()),
         "bundled_version_differs": [
@@ -1254,13 +1257,10 @@ def _run_cli(
         "ignored_targets": data["ignored_targets"],
         "notes": notes,
     } | ({"blocking_newer_python": data["blocking_newer_python"]} if "blocking_newer_python" in data else {})
-    # --dockerfile-inputs: the files each RUN line read, the lines wheelgap couldn't see into, and whether the answer
-    # covers every line (summary.complete), as --json gives them.
+    # --dockerfile-inputs: the files each RUN line read and the lines wheelgap couldn't see into, as --json gives them.
     for key in ("dockerfile_inputs", "dockerfile_warnings"):
         if key in data:
             result[key] = data[key]
-    if "complete" in data["summary"]:
-        result["summary"] = {"complete": data["summary"]["complete"]}
     # --dist: targets the previous release had a wheel for that this one drops, labelled like results.
     if "dropped" in data:
         result["dropped"] = {label[k]: v for k, v in data["dropped"].items()}

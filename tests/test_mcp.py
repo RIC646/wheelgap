@@ -1350,6 +1350,7 @@ def test_check_dockerfile_inputs_returns_the_lines_it_read_and_the_ones_it_could
     data = reply["result"]["structuredContent"]
     assert data["ok"] is True and data["passes"] is True  # the packages read have wheels, as the CLI's exit code says
     assert data["summary"] == {"complete": False}
+    assert list(data)[list(data).index("passes") + 1] == "summary"  # read beside the verdict it qualifies
     what = "this line runs `./setup.sh`, a script or program at a path"
     [warning] = data["dockerfile_warnings"]
     assert (warning["line"], warning["kind"]) == (6, "may-install") and warning["message"].startswith(what)

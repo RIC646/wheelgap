@@ -1877,7 +1877,10 @@ class _Shell:
         self.pos = at + len(operator)
         while self.pos < len(text) and text[self.pos] in " \t":
             self.pos += 1
-        return operator, self._word()
+        # An input's file descriptor other than stdin's is kept: `3< FILE` opens fd 3, and the command's input is
+        # unchanged (`0< FILE` is `< FILE`).
+        fd = m.group(0) if m else ""
+        return (fd + operator if "<" in operator and fd.lstrip("0") else operator), self._word()
 
     def _word(self) -> _Word:
         text = self.text
@@ -2338,6 +2341,15 @@ def _project_script(base: str, texts: list[str], stdin: bool = False) -> str | N
         if base == program and (command := next((word for word in words if word in commands), None)):
             return f"{program} {command}"
     scripts_off = "--ignore-scripts" in texts or "--mode=skip-build" in texts
+    # A global install of named packages (`npm install -g pnpm@9`, `yarn global add serve`) runs those packages'
+    # scripts, not the project's, as a system package's do: a plain program. With no package named (`npm install -g`)
+    # or a local one (`npm install -g ./tools/x`) it installs the project's own code.
+    global_install = any(text in ("-g", "--global", "--location=global") for text in texts) or (
+        base == "yarn" and "global" in words
+    )
+    packages = [word for word in words if word not in ("global", *_LIFECYCLE_COMMANDS.get(base, ()))]
+    if global_install and packages and not any(word.startswith((".", "/", "~", "file:")) for word in packages):
+        scripts_off = True
     if base in _LIFECYCLE_COMMANDS and not scripts_off:
         if command := next((word for word in words if word in _LIFECYCLE_COMMANDS[base]), None):
             return f"{base} {command}"
@@ -2558,8 +2570,8 @@ class _RunReader:
             if first == "hash" and any(word.text.startswith("-p") for word in words[1:]):
                 # bash's `hash -p FILE NAME` makes NAME run FILE, whatever the PATH says.
                 self.path = "unknown", f"line {number} sets where a command is found with `hash -p`"
-            # Input from a redirect or a pipe: an interpreter with no script named runs it (`python < setup.py`). The
-            # redirect's file descriptor isn't kept, so `3< FILE` counts too.
+            # Input from a redirect or a pipe: an interpreter with no script named runs it (`python < setup.py`).
+            # `3< FILE` opens another file descriptor (its operator is "3<"), not the input.
             stdin = command.before == "|" or any(op in ("<", "<<<", "<>", "<&") for op, _ in command.redirects)
             kind, detail = self._classify(number, words, cwd, uv_system, stop, stdin) if words else ("shell", "")
             if kind in ("install", "installer-tools", "pip"):

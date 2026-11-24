@@ -3611,6 +3611,29 @@ def test_dockerfile_requirements_passes_over_plain_programs(tmp_path, run):
         assert list(report.passed_over) == ["programs"]
 
 
+@pytest.mark.parametrize(
+    "run",
+    ["npm install -g pnpm@9", "npm i -g npm@latest", "yarn global add serve", "pnpm add -g turbo", "bun add -g x"],
+)
+def test_dockerfile_requirements_passes_over_a_global_install_of_named_packages(tmp_path, run):
+    # They run the named packages' scripts, not the project's: a plain program, before an install and with --deps.
+    lines, report = _inputs(tmp_path, f"RUN {run}\n{_INSTALL}")
+    assert lines == [5] and report.warnings == [] and list(report.passed_over) == ["programs"]
+
+
+@pytest.mark.parametrize("run", ["npm install -g", "npm install -g ./tools/cli", "yarn global add file:./cli"])
+def test_dockerfile_requirements_warns_about_a_global_install_of_the_project(tmp_path, run):
+    _, report = _inputs(tmp_path, f"{_INSTALL}RUN {run}\n")
+    assert [line for line, _ in report.warnings] == [5]
+
+
+@pytest.mark.parametrize(("run", "warns"), [("python 3< s.py", False), ("python 0< s.py", True), ("python <&3", True)])
+def test_dockerfile_requirements_reads_only_stdin_redirects_as_a_script(tmp_path, run, warns):
+    # `3< FILE` opens fd 3; python reads its script from fd 0.
+    _, report = _inputs(tmp_path, f"{_INSTALL}RUN {run}\n")
+    assert bool(report.warnings) is warns
+
+
 def test_dockerfile_requirements_keeps_bunx_unknown(tmp_path):
     # As on main: a program wheelgap doesn't know, a stop before an install and a warning after it.
     with pytest.raises(DockerfileError, match=":4: this line runs `bunx some-tool`, a program wheelgap doesn't know"):

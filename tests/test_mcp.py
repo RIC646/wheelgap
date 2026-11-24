@@ -1336,6 +1336,44 @@ def test_check_dockerfile_inputs_checks_what_the_image_installs(fake_pypi, tmp_p
     assert reply["result"]["structuredContent"]["packages"] == 5
 
 
+def test_check_dockerfile_inputs_returns_the_lines_it_read_and_the_ones_it_couldnt(fake_pypi, tmp_path):
+    # #708: a line wheelgap can't see into after the last install: the CLI says complete false, and so must the tool.
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "FROM python:3.13-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n"
+        "COPY setup.sh .\nRUN ./setup.sh\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "requirements.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "setup.sh").write_text("pip install psycopg2\n", encoding="utf-8")
+    (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile), inputs=True))
+    data = reply["result"]["structuredContent"]
+    assert data["ok"] is True and data["passes"] is True  # the packages read have wheels, as the CLI's exit code says
+    assert data["summary"] == {"complete": False}
+    assert list(data)[list(data).index("passes") + 1] == "summary"  # read beside the verdict it qualifies
+    what = "this line runs `./setup.sh`, a script or program at a path"
+    [warning] = data["dockerfile_warnings"]
+    assert (warning["line"], warning["kind"]) == (6, "may-install") and warning["message"].startswith(what)
+    assert f"warning: {dockerfile}:6: {what}" in " ".join(data["notes"])
+    assert data["dockerfile_inputs"] == [
+        {"dockerfile": str(dockerfile), "line": 4, "file": "requirements.txt", "constraints": [], "includes": []}
+    ]
+    # Every line read: complete, and nothing to warn about.
+    dockerfile.write_text(INSTALLS_REQUIREMENTS, encoding="utf-8")
+    (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile), inputs=True))
+    data = reply["result"]["structuredContent"]
+    assert data["summary"] == {"complete": True}
+    assert data["dockerfile_warnings"] == [] and not [note for note in data["notes"] if note.startswith("warning: ")]
+    assert [entry["file"] for entry in data["dockerfile_inputs"]] == ["requirements.txt"]
+
+
+def test_check_dockerfile_without_inputs_adds_no_inputs_keys(fake_pypi, tmp_path, fixtures):
+    dockerfile = dockerfile_project(tmp_path, fixtures, INSTALLS_REQUIREMENTS)
+    (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile)))
+    data = reply["result"]["structuredContent"]
+    assert not {"summary", "dockerfile_inputs", "dockerfile_warnings"} & set(data)
+
+
 def test_check_dockerfile_inputs_reads_the_build_context(fake_pypi, tmp_path):
     # docker build -f docker/Dockerfile . : COPY sources come from the context, not the Dockerfile's folder.
     (tmp_path / "docker").mkdir()

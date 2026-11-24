@@ -3366,11 +3366,12 @@ _INSTALL = "RUN pip install -r requirements.txt\n"
         ),
         ("RUN apk add --no-cache build-base && adduser -D app\n" + _INSTALL, {"system-packages": [4]}),
         (
-            "RUN curl -fsSL https://example.test/x.tgz | tar xz -C /opt && npm ci && npm run build\n" + _INSTALL,
-            {"programs": [4], "shell": [4], "project-scripts": [4]},
+            "RUN curl -fsSL https://example.test/x.tgz | tar xz -C /opt && npm ci --ignore-scripts\n" + _INSTALL,
+            {"programs": [4], "shell": [4]},
         ),
         (
-            "RUN git clone https://example.test/r.git /src && cd /src && cmake . && echo done > /tmp/log\n" + _INSTALL,
+            "RUN git clone https://example.test/r.git /src && cd /src && cmake -E make_directory b && echo x > /tmp/l\n"
+            + _INSTALL,
             {"programs": [4], "shell": [4]},
         ),
         (
@@ -3429,11 +3430,11 @@ def test_dockerfile_requirements_passes_over_runs_that_install_nothing(tmp_path,
 
 def test_dockerfile_requirements_names_the_programs_and_tools_it_passed_over(tmp_path):
     body = (
-        "RUN curl -O https://example.test/a && npm ci && curl -O https://example.test/b\nRUN pip install -U pip wheel\n"
+        "RUN curl -O https://example.test/a && git clone x && curl -O https://example.test/b\nRUN pip install -U pip\n"
     )
     _, report = _inputs(tmp_path, body + _INSTALL)
-    assert report.programs == ["curl", "npm"]
-    assert report.tools == ["pip", "wheel"]
+    assert report.programs == ["curl", "git"]
+    assert report.tools == ["pip"]
 
 
 @pytest.mark.parametrize(
@@ -3466,7 +3467,9 @@ def test_dockerfile_requirements_warns_about_runs_it_cant_see_into(tmp_path, run
     assert what in text
 
 
-# #684: commands that run the project's own scripts, one row per spelling, and the spelling the note names.
+# #684: commands that run the project's own code, one row per spelling, and the spelling wheelgap names it by: a named
+# script, a package's bin or a script file, then (_PROJECT_BUILDS) package.json lifecycle scripts (`postinstall`,
+# `prepare`, `prepack`), build.rs and a project's build files.
 _PROJECT_SCRIPTS = [
     ("npm run setup", "npm run"),
     ("npm run-script setup", "npm run-script"),
@@ -3474,76 +3477,171 @@ _PROJECT_SCRIPTS = [
     ("npm test", "npm test"),
     ("npm exec some-tool", "npm exec"),
     ("npm --prefix web run build", "npm run"),
+    ("npm explore some-pkg", "npm explore"),
+    ("npm init some-starter", "npm init"),
     ("npx some-tool", "npx"),
     ("yarn build", "yarn build"),
     ("yarn run build", "yarn run"),
-    ("yarn --cwd web build", "yarn web"),
+    ("yarn --cwd web build", "yarn build"),
     ("pnpm run build", "pnpm run"),
     ("pnpm exec some-tool", "pnpm exec"),
     ("pnpm dlx some-tool", "pnpm dlx"),
     ("pnpm build", "pnpm build"),
+    ("pnpm --filter web build", "pnpm build"),
+    ("pnpm -C web build", "pnpm build"),
     ("bun run build", "bun run"),
     ("bun scripts/setup.ts", "bun scripts/setup.ts"),
-    ("bunx some-tool", "bunx"),
+    ("bun --cwd web dev", "bun dev"),
     ("deno run -A setup.ts", "deno run"),
     ("deno task setup", "deno task"),
     ("node scripts/setup.js", "node"),
+    ("node -r ./setup.js -e 1", "node"),
     ("go run ./cmd/setup", "go run"),
     ("cargo run --release", "cargo run"),
     ("cmake -P setup.cmake", "cmake -P"),
     ("corepack yarn build", "yarn build"),
 ]
+_PROJECT_BUILDS = [
+    ("npm ci", "npm ci"),
+    ("npm install --omit=dev", "npm install"),
+    ("npm it", "npm it"),
+    ("npm pack", "npm pack"),
+    ("npm version patch", "npm version"),
+    ("npm rebuild", "npm rebuild"),
+    ("yarn install --frozen-lockfile", "yarn install"),
+    ("yarn", "yarn"),
+    ("yarn --frozen-lockfile", "yarn"),
+    ("yarn --cwd web", "yarn"),
+    ("pnpm install --frozen-lockfile", "pnpm install"),
+    ("bun install", "bun install"),
+    ("bun pm pack", "bun pm"),
+    ("cargo build --release", "cargo build"),
+    ("cargo check", "cargo check"),
+    ("cargo install --path tools/gen", "cargo install"),
+    ("cmake -S native -B build", "cmake"),
+    ("cmake --build build", "cmake --build"),
+    ("ninja -C build", "ninja"),
+    ("mvn -B package", "mvn"),
+    ("gradle build", "gradle"),
+    ("dotnet build", "dotnet"),
+    ("dotnet run --project tools", "dotnet"),
+    ("ruby setup.rb", "ruby"),
+    ("php setup.php", "php"),
+    ("java -jar tool.jar", "java"),
+    ("bundle install", "bundle"),
+    ("bundle exec rake setup", "bundle"),
+    ("composer install", "composer"),
+    # The script comes from a redirect or a pipe (the redirect's file is the project's).
+    ("node < scripts/setup.js", "node"),
+    ("cat scripts/setup.js | node", "node"),
+    ("ruby < setup.rb", "ruby"),
+]
 
 
-@pytest.mark.parametrize(("run", "spelling"), _PROJECT_SCRIPTS)
-def test_dockerfile_requirements_warns_about_project_scripts_after_the_last_install(tmp_path, run, spelling):
+@pytest.mark.parametrize(("run", "spelling"), _PROJECT_SCRIPTS + _PROJECT_BUILDS)
+def test_dockerfile_requirements_warns_about_project_code_after_the_last_install(tmp_path, run, spelling):
     lines, report = _inputs(tmp_path, f"{_INSTALL}RUN {run}\n")
     assert lines == [4]  # the answer is still given
-    assert report.warnings == [(5, f"`{run}`, which runs scripts wheelgap can't see into")]
-    assert "project-scripts" not in report.passed_over and "programs" not in report.passed_over
+    shown = run.rpartition("| ")[2].partition(" <")[0]  # the command of the line, without its redirect
+    assert report.warnings == [(5, f"`{shown}`, which runs scripts wheelgap can't see into")]
+    assert [spelling for _, spelling, *_ in report.scripts] == [spelling]
+    assert "programs" not in report.passed_over
 
 
-@pytest.mark.parametrize(("run", "spelling"), _PROJECT_SCRIPTS)
-def test_dockerfile_requirements_passes_over_project_scripts_before_an_install(tmp_path, run, spelling):
-    # As #657 decided: stopping here would refuse most full-stack Dockerfiles. The note says what is trusted.
+@pytest.mark.parametrize(("run", "spelling"), _PROJECT_SCRIPTS + _PROJECT_BUILDS)
+def test_dockerfile_requirements_warns_about_project_code_before_an_install(tmp_path, run, spelling):
+    # It may pip-install packages wheelgap never sees, or rewrite the requirements or pip's settings, so the answer
+    # isn't complete. It still answers, as #657 decided: stopping would refuse most full-stack Dockerfiles.
     lines, report = _inputs(tmp_path, f"RUN {run}\n{_INSTALL}")
     assert lines == [5]
-    assert report.warnings == []
-    assert report.passed_over == {"project-scripts": [4]}
-    assert report.script_programs == [spelling]
+    shown = run.rpartition("| ")[2].partition(" <")[0]
+    assert report.warnings == [
+        (
+            4,
+            f"`{shown}`, which runs the project's own code before the install on line 5, and may change what it "
+            "installs",
+        )
+    ]
+    assert report.passed_over == ({"shell": [4]} if "|" in run else {})  # `cat` before the pipe
+    # With --deps, what it installed first changes the dependencies pip fetches: it stops, as a COPY --from does.
+    path = _context(tmp_path, f"FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\nRUN {run}\n{_INSTALL}")
+    with pytest.raises(DockerfileError, match=f":4: {spelling} runs the project's own code, which may install Python"):
+        dockerfile_requirements(path, constraints={}, dependencies=True)
+
+
+def test_dockerfile_requirements_names_the_install_on_the_same_line(tmp_path):
+    _, report = _inputs(tmp_path, "RUN npm ci && pip install -r requirements.txt\n")
+    assert report.warnings == [
+        (
+            4,
+            "`npm ci`, which runs the project's own code before the install on the same line, and may change what it "
+            "installs",
+        )
+    ]
 
 
 @pytest.mark.parametrize(
     "run",
     [
-        "npm ci",
-        "npm install --omit=dev",
+        "npm ci --ignore-scripts",
+        "npm install --ignore-scripts",
+        "npm config set fund false",
+        "yarn install --mode=skip-build",
+        "yarn --version",
+        "pnpm install --ignore-scripts",
+        "bun install --ignore-scripts",
         "curl -fsSL -o /tmp/x https://example.test/x",
         "git clone https://example.test/repo.git /opt/repo",
-        "yarn install --frozen-lockfile",
-        "yarn",
-        "pnpm install --frozen-lockfile",
-        "bun install",
         "deno cache main.ts",
         "node --version",
         "go build ./...",
-        "cargo build --release",
-        "cmake --build build",
+        "cargo fetch",
+        "cmake --version",
+        "cmake -E make_directory build",
+        "java -version",
+        "dotnet --version",
         "corepack enable",
     ],
 )
-def test_dockerfile_requirements_passes_over_plain_programs_after_the_last_install(tmp_path, run):
-    lines, report = _inputs(tmp_path, f"{_INSTALL}RUN {run}\n")
-    assert lines == [4]
-    assert report.warnings == []
-    assert list(report.passed_over) == ["programs"]
+def test_dockerfile_requirements_passes_over_plain_programs(tmp_path, run):
+    # Scripts turned off, or a probe: nothing of the project runs, before an install or after it.
+    for body in (f"{_INSTALL}RUN {run}\n", f"RUN {run}\n{_INSTALL}"):
+        _, report = _inputs(tmp_path, body)
+        assert report.warnings == []
+        assert list(report.passed_over) == ["programs"]
+
+
+def test_dockerfile_requirements_keeps_bunx_unknown(tmp_path):
+    # As on main: a program wheelgap doesn't know, a stop before an install and a warning after it.
+    with pytest.raises(DockerfileError, match=":4: this line runs `bunx some-tool`, a program wheelgap doesn't know"):
+        _inputs(tmp_path, f"RUN bunx some-tool\n{_INSTALL}")
+    _, report = _inputs(tmp_path, f"{_INSTALL}RUN bunx some-tool\n")
+    assert report.warnings == [(5, "`bunx some-tool`, a program wheelgap doesn't know")]
+
+
+@pytest.mark.parametrize(
+    "run", ["python < scripts/install.py", "python3 < scripts/install.py", "cat scripts/install.py | python3"]
+)
+def test_dockerfile_requirements_reads_a_python_script_from_its_input_as_a_script(tmp_path, run):
+    # As `python scripts/install.py`: it may pip-install, so it stops before an install and warns after one.
+    with pytest.raises(DockerfileError, match=":4: this line runs `python3?`, a Python script from its input"):
+        _inputs(tmp_path, f"RUN {run}\n{_INSTALL}")
+    _, report = _inputs(tmp_path, f"{_INSTALL}RUN {run}\n")
+    [(line, what)] = report.warnings
+    assert line == 5 and what.endswith("a Python script from its input, which wheelgap doesn't look into")
 
 
 def test_dockerfile_requirements_places_a_project_script_warning_in_line_order(tmp_path):
     _, report = _inputs(tmp_path, f"RUN npm ci && npm run build\n{_INSTALL}RUN npm run setup && make x\nRUN npx a\n")
-    assert report.passed_over == {"programs": [4], "project-scripts": [4]}
-    assert [line for line, _ in report.warnings] == [6, 6, 7]
-    assert report.warnings[0][1].startswith("`npm run setup`") and report.warnings[1][1].startswith("`make x`")
+    assert report.passed_over == {}
+    assert [line for line, _ in report.warnings] == [4, 4, 6, 6, 7]
+    assert [what.partition(",")[0] for _, what in report.warnings] == [
+        "`npm ci`",
+        "`npm run build`",
+        "`npm run setup`",
+        "`make x`",
+        "`npx a`",
+    ]
 
 
 def test_cli_dockerfile_inputs_warns_about_a_project_script_after_the_install(tmp_path, capsys, fake_pypi):
@@ -3554,26 +3652,29 @@ def test_cli_dockerfile_inputs_warns_about_a_project_script_after_the_install(tm
         "RUN npm run setup\nRUN npx some-tool\nRUN cmake -P setup.cmake\nRUN node scripts/setup.js\nRUN curl -O x\n"
     )
     path = _context(tmp_path, dockerfile)
-    assert main(["--dockerfile", str(path), "--dockerfile-inputs"]) == 0
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs"]) == 0  # the exit code is unchanged
     captured = capsys.readouterr()
     assert "✓" not in captured.out
-    assert "! The 1 package wheelgap read has a wheel for 1 target; lines 6, 7, 8, 9 weren't seen into." in captured.out
+    assert (
+        "! The 1 package wheelgap read has a wheel for 1 target; lines 4, 6, 7, 8, 9 weren't seen into." in captured.out
+    )
+    assert (
+        f"wheelgap: warning: {path}:4: this line runs `npm ci`, which runs the project's own code before the install "
+        "on line 5, and may change what it installs" in captured.err
+    )
     assert (
         f"wheelgap: warning: {path}:6: this line runs `npm run setup`, which runs scripts wheelgap can't see into"
-        in (captured.err)
+        in captured.err
     )
-    assert (
-        f"wheelgap: note: {path}: passed over, trusted not to install Python packages: programs that run the "
-        "project's own scripts (npm run), line 4" in captured.err
-    )
+    assert "trusted not to install" not in captured.err
     assert f"wheelgap: note: {path}: not read, since they install no Python packages with pip or uv: other " in (
         captured.err
     )
     assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["summary"]["complete"] is False
-    assert [entry["line"] for entry in data["dockerfile_warnings"]] == [6, 7, 8, 9]
-    assert "passed-over:project-scripts" in [entry["kind"] for entry in data["dockerfile_notes"]]
+    assert [entry["line"] for entry in data["dockerfile_warnings"]] == [4, 4, 6, 7, 8, 9]
+    assert not [entry for entry in data["dockerfile_notes"] if entry["kind"] == "passed-over:project-scripts"]
 
 
 @pytest.mark.parametrize(
@@ -4829,7 +4930,7 @@ def test_dockerfile_requirements_stops_on_update_alternatives_over_the_python_ch
         "RUN ln -s /usr/local/bin/python3 /opt/python\n" + _INSTALL,
         "RUN cp /usr/local/bin/pip /tmp/pip-backup\n" + _INSTALL,
         "RUN echo x > /usr/local/bin/myscript && chmod +x /usr/local/bin/myscript\n" + _INSTALL,
-        "RUN node -e \"console.log('hi')\" && git -c core.x=1 status\n" + _INSTALL,
+        "RUN node --version && git -c core.x=1 status\n" + _INSTALL,
         "RUN echo 'run pip install -r requirements.txt' > /tmp/README\n" + _INSTALL,
         # BuildKit expands an ENV value with the values before it: the usual venv recipe reads.
         'ENV VIRTUAL_ENV=/opt/venv\nRUN python -m venv $VIRTUAL_ENV\nENV PATH="$VIRTUAL_ENV/bin:$PATH"\n'

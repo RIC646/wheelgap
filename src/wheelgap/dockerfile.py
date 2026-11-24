@@ -2054,15 +2054,34 @@ _PROGRAMS = frozenset(
     "ninja java javac mvn gradle dotnet ruby gem bundle composer php openssl ssh-keygen ssh-keyscan jq envsubst strip "
     "ldd pkg-config autoreconf autoconf automake playwright".split()
 )
-# Of those, the spellings that run the project's own code (#684): a package.json script (`npm run setup`, `yarn build`,
-# `pnpm start`), a package's bin (`npx`, `bunx`, `pnpm dlx`), a script file (`node setup.js`, `deno run`, `go run`,
-# `cargo run`, `cmake -P`). Any of them may run `pip install`. Before an install they are passed over with a note that
-# says what is trusted; after the last install read they are warnings, as a script is (_project_script).
-_NPM_SCRIPT_COMMANDS = frozenset("run run-script rum urn start test t tst restart stop exec x".split())
+# Of those, the spellings that run the project's own code (#684): a package.json script, named (`npm run setup`, `yarn
+# build`, `pnpm start`) or a lifecycle one (`postinstall` under `npm ci`), a package's bin (`npx`, `pnpm dlx`), a build
+# file (build.rs under `cargo build`, CMakeLists.txt, pom.xml) or a script file (`node setup.js`, `deno run`, `go run`,
+# `cmake -P`). Any of them may run `pip install`, so each is a warning: after the last install read, in its place as a
+# script is; before an install, saying it may change what that install fetches (and with --deps, an error), since
+# stopping at every `npm ci && npm run build` would refuse most full-stack Dockerfiles (#657) (_project_script).
+_NPM_SCRIPT_COMMANDS = frozenset(
+    "run run-script rum urn start test t tst restart stop exec x explore init create".split()
+)
 _GO_SCRIPT_COMMANDS = frozenset("run generate test".split())
-_CARGO_SCRIPT_COMMANDS = frozenset("run test bench".split())
+# build.rs and procedural macros run for every command that compiles the package.
+_CARGO_SCRIPT_COMMANDS = frozenset(
+    "run r test t bench build b check c install doc d clippy rustc rustdoc fix package publish".split()
+)
+# Commands that run the root package.json's lifecycle scripts (`postinstall`, `prepare`, `prepack`, `version`): a
+# project's own scripts too, unless `--ignore-scripts` (yarn 2+: `--mode=skip-build`) turns them off.
+_LIFECYCLE_COMMANDS = {
+    "npm": frozenset(
+        "ci clean-install ic install-clean isntall-clean install i in ins inst insta instal isnt isnta isntal isntall "
+        "add install-test it install-ci-test cit clean-install-test sit rebuild rb pack publish version update up "
+        "upgrade udpate dedupe ddp".split()
+    ),
+    "yarn": frozenset("install add upgrade up remove pack publish version".split()),
+    "pnpm": frozenset("install i add update up upgrade remove rm uninstall un rebuild rb pack publish deploy".split()),
+    "bun": frozenset("install i add a remove rm update pm publish".split()),
+}
 # yarn, pnpm, bun and deno run a script or file by its name (`yarn build`, `pnpm lint`, `bun x.ts`, `deno main.ts`), so
-# only their other commands, which install or inspect, are plain programs.
+# only their other commands, which inspect or install, are plain programs (an install only with its scripts off).
 _RUNNER_COMMANDS = {
     "yarn": frozenset(
         "install add remove upgrade up cache config info why list audit init set pack publish version outdated "
@@ -2081,6 +2100,31 @@ _RUNNER_COMMANDS = {
     ),
 }
 _NODE_PROBES = frozenset("-v --version -h --help".split())
+# The options of the script runners that take a value as the next word, which isn't the command (`yarn --cwd web build`,
+# `pnpm --filter web build`), so the warning names `yarn build`.
+_OPTION_VALUES = {
+    "yarn": frozenset(
+        "--cwd --modules-folder --cache-folder --global-folder --link-folder --mutex --network-timeout "
+        "--registry".split()
+    ),
+    "pnpm": frozenset("--filter -F -C --dir --reporter --registry --store-dir --workspace-concurrency".split()),
+    "bun": frozenset("--cwd --filter -F --config -c --registry".split()),
+    "deno": frozenset("--config -c --import-map --lock --cwd".split()),
+}
+# Programs that run a script file or the project's build files (CMakeLists.txt, build.ninja, pom.xml, build.gradle,
+# a .csproj, Gemfile, composer.json) for anything but these probes.
+_PROBES = {
+    "ruby": _NODE_PROBES,
+    "php": _NODE_PROBES,
+    "java": frozenset("-version --version -showversion -h -help --help".split()),
+    "cmake": frozenset("--version -version --help -h".split()),
+    "ninja": frozenset("--version -h --help".split()),
+    "mvn": frozenset("-v --version -h --help".split()),
+    "gradle": frozenset("-v --version -h --help".split()),
+    "dotnet": frozenset("--version --info --list-sdks --list-runtimes -h --help".split()),
+    "bundle": frozenset("-v --version version -h --help help".split()),
+    "composer": frozenset("-V --version -h --help".split()),
+}
 # Tools that install Python packages in ways --dockerfile-inputs doesn't read: a line running one is an error.
 _INSTALLERS = frozenset(
     "poetry pdm pipenv conda mamba micromamba pipx easy_install hatch pixi rye uvx pip-sync flit".split()
@@ -2102,7 +2146,6 @@ PASSED_OVER = {
     "system-packages": "system package and account commands",
     "shell": "shell and file commands",
     "programs": "other programs",
-    "project-scripts": "programs that run the project's own scripts",
     "venv": "virtual environment set-up",
     "cache-mounts": "cache mounts",
     "copy-from": "files copied from another stage or image",
@@ -2212,9 +2255,8 @@ class InputsReport:
     # PASSED_OVER, and "installer-tools").
     passed_over: dict[str, list[int]] = field(default_factory=dict)
     programs: list[str] = field(default_factory=list)  # the programs of the "programs" class, in order
-    script_programs: list[str] = field(default_factory=list)  # the spellings of the "project-scripts" class, in order
-    # (line, spelling, what it runs, len(warnings), len(unseen)) for each command that runs the project's own scripts
-    # (_project_script), in order: a warning, at that place, if it comes after the last install read, else passed over.
+    # (line, spelling, the command, len(warnings), len(unseen)) for each command that runs the project's own code
+    # (_project_script), in order: a warning at that place, worded by whether an install it may change comes after it.
     scripts: list[tuple[int, str, str, int, int]] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)  # what the "installer-tools" lines install
     # (line, what it runs) for lines that may install Python packages wheelgap can't see: a script, make, a program
@@ -2264,14 +2306,29 @@ class _Install:
     scripts: int = 0  # how many commands that run the project's own scripts come before it (InputsReport.scripts)
 
 
-def _project_script(base: str, texts: list[str]) -> str | None:
+def _project_script(base: str, texts: list[str], stdin: bool = False) -> str | None:
     """How this command runs the project's own code (`npm run`, `npx`, `cmake -P`), or None if it doesn't. Where an
     option's value may stand before the command word (`npm --prefix web run build`, `go -C app run .`), any word
-    counts, so a doubtful command is a script: a warning after the last install, never a pass."""
+    counts, so a doubtful command is a script: a warning, never a pass. `stdin`: the command reads its input from a
+    redirect or a pipe, which an interpreter runs as a script."""
     if base == "corepack" and texts and texts[0] in ("npm", "npx", "yarn", "pnpm"):
-        return _project_script(texts[0], texts[1:])
+        return _project_script(texts[0], texts[1:], stdin)
+    if stdin and base in ("node", "ruby", "php"):
+        return base  # `node < setup.js`: the script comes from the redirect or the pipe
     words = [text for text in (texts[: texts.index("--")] if "--" in texts else texts) if not text.startswith("-")]
-    if base in ("npx", "bunx"):
+    # For the runners that take a script's name, the command word is the first that isn't an option's value
+    # (`yarn --cwd web build` runs `build`); for the others any word counts.
+    if base in _OPTION_VALUES:
+        named, skip = [], False
+        for text in texts[: texts.index("--")] if "--" in texts else texts:
+            if skip:
+                skip = False
+            elif text in _OPTION_VALUES[base]:
+                skip = True
+            elif not text.startswith("-"):
+                named.append(text)
+        words = named
+    if base == "npx":
         return base
     for program, commands in (
         ("npm", _NPM_SCRIPT_COMMANDS),
@@ -2280,12 +2337,22 @@ def _project_script(base: str, texts: list[str]) -> str | None:
     ):
         if base == program and (command := next((word for word in words if word in commands), None)):
             return f"{program} {command}"
+    scripts_off = "--ignore-scripts" in texts or "--mode=skip-build" in texts
+    if base in _LIFECYCLE_COMMANDS and not scripts_off:
+        if command := next((word for word in words if word in _LIFECYCLE_COMMANDS[base]), None):
+            return f"{base} {command}"
+        if base == "yarn" and not words and not (texts and all(text in _NODE_PROBES for text in texts)):
+            return "yarn"  # a bare `yarn` (`yarn --frozen-lockfile`) installs
     if base in _RUNNER_COMMANDS and words and words[0] not in _RUNNER_COMMANDS[base]:
         return f"{base} {words[0]}"
     if base == "node" and not all(text in _NODE_PROBES for text in texts):
         return "node"
-    if base == "cmake" and "-P" in texts:
-        return "cmake -P"
+    if base == "cmake" and texts and texts[0] != "-E" and not all(text in _PROBES["cmake"] for text in texts):
+        return next(
+            (f"cmake {flag}" for flag in ("-P", "--build", "--install", "--workflow") if flag in texts), "cmake"
+        )
+    if base in _PROBES and base != "cmake" and texts and not all(text in _PROBES[base] for text in texts):
+        return base
     return None
 
 
@@ -2491,7 +2558,10 @@ class _RunReader:
             if first == "hash" and any(word.text.startswith("-p") for word in words[1:]):
                 # bash's `hash -p FILE NAME` makes NAME run FILE, whatever the PATH says.
                 self.path = "unknown", f"line {number} sets where a command is found with `hash -p`"
-            kind, detail = self._classify(number, words, cwd, uv_system, stop) if words else ("shell", "")
+            # Input from a redirect or a pipe: an interpreter with no script named runs it (`python < setup.py`). The
+            # redirect's file descriptor isn't kept, so `3< FILE` counts too.
+            stdin = command.before == "|" or any(op in ("<", "<<<", "<>", "<&") for op, _ in command.redirects)
+            kind, detail = self._classify(number, words, cwd, uv_system, stop, stdin) if words else ("shell", "")
             if kind in ("install", "installer-tools", "pip"):
                 names_installer = True
             if isinstance(detail, _Install):
@@ -2527,8 +2597,10 @@ class _RunReader:
                 self.report.warn(number, detail)
             elif kind == "project-scripts":
                 assert isinstance(detail, tuple)
-                spelling, what = detail
-                self.report.scripts.append((number, spelling, what, len(self.report.warnings), len(self.report.unseen)))
+                spelling, shown_command = detail
+                self.report.scripts.append(
+                    (number, spelling, shown_command, len(self.report.warnings), len(self.report.unseen))
+                )
             elif kind == "installer-tools":
                 self.report.passed(kind, number)
                 self.report.tools += [name for name in str(detail).split() if name not in self.report.tools]
@@ -2775,7 +2847,7 @@ class _RunReader:
                     )
         self.report.warn(number, f"a `{what}` command list")
 
-    def _classify(self, number, words, cwd, uv_system, stop):  # type: ignore[no-untyped-def]
+    def _classify(self, number, words, cwd, uv_system, stop, stdin=False):  # type: ignore[no-untyped-def]
         """(class, detail) for one simple command: ("install", _Install), ("warning", what it runs), or a class it is
         passed over as. A command that installs Python packages in a way that isn't read is an error (`stop`)."""
         first = words[0]
@@ -2809,6 +2881,8 @@ class _RunReader:
         if _PYTHON_RE.fullmatch(base):
             while args and args[0].text in ("-u", "-B", "-E", "-s", "-I"):
                 args = args[1:]
+            if not args and stdin:  # `python < scripts/install.py`, `cat setup.py | python3`
+                return "warning", f"`{shown}`, a Python script from its input, which wheelgap doesn't look into"
             if not args or args[0].text in ("-V", "--version", "-VV"):
                 return "shell", ""
             option = args[0].text if args[0].exact else None
@@ -2873,8 +2947,8 @@ class _RunReader:
             return "system-packages", ""
         if base in _SHELL_COMMANDS or base == "find":
             return "shell", ""
-        if spelling := _project_script(base, [word.text for word in args]):
-            return "project-scripts", (spelling, f"`{shown}`, which runs scripts wheelgap can't see into")
+        if spelling := _project_script(base, [word.text for word in args], stdin):
+            return "project-scripts", (spelling, shown)
         if base in _PROGRAMS:
             return "programs", base
         return "warning", f"`{shown}`, a program wheelgap doesn't know"
@@ -3430,11 +3504,9 @@ def _dockerfile_requirements(
     env_names: set[str] = set()  # the names an ENV set
     global_defaults = global_args.defaults if not global_args.unreadable else {}
 
-    scripts_before_last = 0  # InputsReport.scripts that come before the last install read
+    installs_read: list[tuple[int, int]] = []  # (line, how many InputsReport.scripts come before it) per install read
 
     def read_install(install: _Install) -> None:
-        nonlocal scripts_before_last
-        scripts_before_last = install.scripts
         if run_error:
             raise DockerfileError(run_error)
         if reader.config_error:
@@ -3457,6 +3529,16 @@ def _dockerfile_requirements(
                 "--dockerfile-inputs doesn't answer (such a line is only passed over, with a warning, after the "
                 "last install it reads)"
             )
+        if dependencies and install.scripts:
+            # As for a COPY --from before an install: what the project's code installed first, pip keeps, and with
+            # --deps that changes the dependency set the install fetches.
+            line, spelling, _, _, _ = report.scripts[0]
+            where = "on the same line" if line == number else f"on line {number}"
+            raise DockerfileError(
+                f"line {line}: {spelling} runs the project's own code, which may install Python packages before the "
+                f"install {where}, and with --deps they change what that install fetches"
+            )
+        installs_read.append((number, install.scripts))
         foreign = [
             copy for copy in copies if copy.foreign is not None and not copy.uv_binaries and _may_hold_packages(copy)
         ]
@@ -3766,16 +3848,22 @@ def _dockerfile_requirements(
                 number, instruction, args, env, workdir, workdir_error, uv_system, arg_values, bash, body
             ):
                 read_install(install)
-    # A command that runs the project's own scripts may run pip: before an install it is trusted not to, as #657
-    # decided (stopping at every `npm ci && npm run build` would refuse most full-stack Dockerfiles), and after the last
-    # install it is a warning in its place, as a script is.
-    for line, spelling, _, _, _ in report.scripts[:scripts_before_last]:
-        report.passed("project-scripts", line)
-        if spelling not in report.script_programs:
-            report.script_programs.append(spelling)
-    for line, _, what, warnings_at, unseen_at in reversed(report.scripts[scripts_before_last:]):
+    # A command that runs the project's own code may run pip: a warning in its place. One before an install may also
+    # change what that install fetches, which the warning says; it doesn't stop the answer, as #657 decided (stopping
+    # at every `npm ci && npm run build` would refuse most full-stack Dockerfiles), but the answer isn't complete.
+    for index in reversed(range(len(report.scripts))):
+        line, _, shown_command, warnings_at, unseen_at = report.scripts[index]
+        later = next((install_line for install_line, before in installs_read if before > index), None)
+        if later is None:
+            what = f"`{shown_command}`, which runs scripts wheelgap can't see into"
+            report.unseen.insert(unseen_at, (line, f"runs {what}"))
+        else:
+            where = "on the same line" if later == line else f"on line {later}"
+            what = (
+                f"`{shown_command}`, which runs the project's own code before the install {where}, and may change "
+                "what it installs"
+            )
         report.warnings.insert(warnings_at, (line, what))
-        report.unseen.insert(unseen_at, (line, f"runs {what}"))
     # A system package installed after the last install can't be one pip keeps instead of fetching.
     del report.system_python[reader.system_before :]
     if not found and not report.named:

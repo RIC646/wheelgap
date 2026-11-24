@@ -536,8 +536,7 @@ The kinds: `image-not-read` (`-p` and `-t` stood in for an [image wheelgap can't
 `image-libc` (that image's tag says Alpine or musl, and glibc targets were checked);
 `passed-over:CLASS`, one per class of `RUN` line [`--dockerfile-inputs`](cli.md#dockerfile-inputs) didn't read
 because it installs no Python packages with pip or uv (`system-packages`, `shell`, `programs`, `venv`,
-`cache-mounts`, `copy-from`, `installer-tools`), or, for `project-scripts` (`npm run`, `npx`, `cmake -P` before an
-install), because it is trusted not to, with `line` `null` and the line numbers in `lines`; `arg-unset` (an
+`cache-mounts`, `copy-from`, `installer-tools`), with `line` `null` and the line numbers in `lines`; `arg-unset` (an
 `ARG PIP_...` with no default, read as unset); and `system-python-packages` (system package commands on `lines`
 install Python packages, which pip may keep instead of fetching a requirement). The key is absent when there is
 nothing to say.

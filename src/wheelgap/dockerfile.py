@@ -2194,6 +2194,9 @@ class InputsReport:
     notes: list[tuple[int, str, str]] = field(default_factory=list)  # (line, kind, message)
     # (line, the requirements a `pip install NAME...` on it names, whether uv installs them), in order.
     named: list[tuple[int, list[str], bool]] = field(default_factory=list)
+    # The -r files of the install each entry of `named` comes from, in order: pip applies their option lines (and the
+    # -c lines inside them) to the requirements named on the line too (sources.parse_named_requirements).
+    named_files: list[tuple[Path, ...]] = field(default_factory=list)
     # (line, the instruction) for each COPY --from that may bring Python packages built in another stage or image:
     # warnings like `warnings`, since the answer doesn't cover them.
     copied: list[tuple[int, str]] = field(default_factory=list)
@@ -3120,9 +3123,12 @@ def _pip_install_files(
     return files, constraints, prefer_binary, names, no_deps
 
 
-def _read_with(host: Path, constraint_paths: tuple[Path, ...], line_files: tuple[Path, ...]) -> tuple[object, ...]:
+def _read_with(
+    host: Path, constraint_paths: tuple[Path, ...], line_files: tuple[Path, ...], dependencies: bool
+) -> tuple[object, ...]:
     """What wheelgap reads from a requirements file installed with these -c and -r files: each requirement's
-    release and the files pip may take for it (and for its dependencies), and whether pip may look beyond PyPI."""
+    release and the files pip may take for it (and for its dependencies), whether pip may look beyond PyPI, and with
+    --deps the constraints on the dependencies it resolves."""
     source = parse_requirements(host, constraint_paths, line_files)
     control = source.format_control
     return (
@@ -3142,6 +3148,7 @@ def _read_with(host: Path, constraint_paths: tuple[Path, ...], line_files: tuple
         source.pypi_only,
         source.index_options,
         source.deps_blockers,
+        (source.constraint_specs, source.marker_constraint_specs) if dependencies else None,
     )
 
 
@@ -3530,8 +3537,8 @@ def _dockerfile_requirements(
             if (
                 host in found
                 and used_line_files[host] != hosts
-                and _read_with(host, constraint_paths, used_line_files[host])
-                != _read_with(host, constraint_paths, hosts)
+                and _read_with(host, constraint_paths, used_line_files[host], dependencies)
+                != _read_with(host, constraint_paths, hosts, dependencies)
             ):
                 # The other -r files' options change what pip picks for this file's requirements, and wheelgap
                 # checks each file once.
@@ -3570,11 +3577,20 @@ def _dockerfile_requirements(
                     "wheel, so it's only read when every requirement on the line is pinned with == "
                     "and --deps isn't used"
                 )
-            # One entry per RUN line and installer: `pip install a && pip install b` names a and b on the line.
-            if report.named and report.named[-1][0] == number and report.named[-1][2] == uv:
+            # A lock sets no options for the names beside it.
+            files = tuple(host for host in hosts if uv or not _PIP_PYLOCK_NAME_RE.fullmatch(host.name))
+            # One entry per RUN line and installer: `pip install a && pip install b` names a and b on the line, unless
+            # the installs read different -r files, whose options count for their own install's names only.
+            if (
+                report.named
+                and report.named[-1][0] == number
+                and report.named[-1][2] == uv
+                and report.named_files[-1] == files
+            ):
                 report.named[-1][1].extend(install.names)
             else:
                 report.named.append((number, list(install.names), uv))
+                report.named_files.append(files)
         # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
         if unread := next((copy for copy in copies if copy.error), None):
             raise DockerfileError(f"line {unread.line}: {unread.error}")

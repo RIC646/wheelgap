@@ -91,6 +91,7 @@ from .sources import (
     check_report_targets,
     load_inputs,
     parse_dist,
+    parse_named_requirements,
     pyproject_group_names,
     pythons_outside_lock,
     requirement_to_package,
@@ -1796,17 +1797,27 @@ def note_prefer_binary(sources: list[Source]) -> None:
             )
 
 
+def _option_list(options: list[str]) -> str:
+    return options[0] if len(options) == 1 else f"{', '.join(options[:-1])} and {options[-1]}"
+
+
 def note_index_options(sources: list[Source]) -> None:
     """One note per requirements file that sets an index option pip reads and wheelgap doesn't (Source.index_options):
-    by the option's name only, since its value may hold credentials."""
+    by the option's name only, since its value may hold credentials. Another -r file of the same pip install line
+    that sets one gets a note for this file too, naming the file that sets it."""
     for source in sources:
+        for setter, options in source.line_index_options:
+            print(
+                f"wheelgap: note: {setter} sets {_option_list(options)} for the install that reads {source.label} "
+                f"too, which wheelgap doesn't read: {source.label}'s packages were checked on PyPI only, so a package "
+                "pip finds elsewhere may install differently",
+                file=sys.stderr,
+            )
         if not source.index_options:
             continue
-        options = source.index_options
-        named = options[0] if len(options) == 1 else f"{', '.join(options[:-1])} and {options[-1]}"
         print(
-            f"wheelgap: note: {source.label} sets {named}, which wheelgap doesn't read: its packages were checked on "
-            "PyPI only, so a package pip finds elsewhere may install differently",
+            f"wheelgap: note: {source.label} sets {_option_list(source.index_options)}, which wheelgap doesn't read: "
+            "its packages were checked on PyPI only, so a package pip finds elsewhere may install differently",
             file=sys.stderr,
         )
 
@@ -2554,11 +2565,17 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     if args.inputs
                     else []
                 )
-                for named_line, named_texts, by_uv in inputs_report.named:
-                    named = Source(f"{args.dockerfile}:{named_line}", pypi_only=True)
-                    for text in named_texts:
-                        named.packages.append(requirement_to_package(text, named.label))
-                        named.specs.append(text)
+                for (named_line, named_texts, by_uv), line_files in zip(
+                    inputs_report.named, inputs_report.named_files, strict=True
+                ):
+                    named_label = f"{args.dockerfile}:{named_line}"
+                    if line_files:  # the line's -r files set options for the names too, as pip reads them
+                        named = parse_named_requirements(named_label, named_texts, line_files)
+                    else:
+                        named = Source(named_label, pypi_only=True)
+                        for text in named_texts:
+                            named.packages.append(requirement_to_package(text, named.label))
+                            named.specs.append(text)
                     sources.append(named)
                     if by_uv:
                         uv_named.add(id(named))

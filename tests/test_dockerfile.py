@@ -2070,7 +2070,53 @@ def test_cli_dockerfile_inputs_notes_an_index_option_of_another_file_of_the_line
     path = _context(tmp_path, _ONE_LINE.format("-r a.txt -r b.txt"), ["a.txt", "b.txt", "c.txt"])
     (tmp_path / "a.txt").write_text("--extra-index-url https://example.test/simple\n", encoding="utf-8")
     assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--no-cache"]) == 0
-    assert "note: b.txt sets --extra-index-url, which wheelgap doesn't read" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    # The note names the file that sets the option, for the file whose packages it changes.
+    assert (
+        "note: a.txt sets --extra-index-url for the install that reads b.txt too, which wheelgap doesn't read: "
+        "b.txt's packages were checked on PyPI only" in err
+    )
+    assert "note: b.txt sets" not in err
+    assert "note: a.txt sets --extra-index-url, which wheelgap doesn't read" in err
+
+
+@pytest.mark.parametrize(
+    ("a", "run", "expected"),
+    [
+        # pip 26.3 reads the requirements named on the line with the -r files' options, in either order:
+        # `-r nb.txt fastlib==2.0.0` and `fastlib==2.0.0 -r nb.txt` both find no distribution with only a wheel.
+        ("--no-binary :all:\n", "-r a.txt fastlib==2.0.0", ("2.0.0", "source")),
+        ("--no-binary :all:\n", "fastlib==2.0.0 -r a.txt", ("2.0.0", "source")),
+        ("--only-binary :all:\n", "-r a.txt nowheels==0.9", ("0.9", "missing")),
+        ("--pre\n", "-r a.txt prelib>=0.5", ("2.0rc1", "source")),
+        ("--pre\n", "prelib>=0.5 -r a.txt", ("2.0rc1", "source")),
+        ("-c c.txt\n", "-r a.txt ranged", ("1.9", "source")),  # a -c line inside a.txt: pip 26.3 takes the pin
+        ("purewheel==3.1\n", "-r a.txt fastlib==2.0.0", ("2.0.0", "wheel")),  # no option lines: as before
+        ("--no-binary :all:\n", "fastlib==2.0.0", ("2.0.0", "wheel")),  # a.txt isn't on the line
+    ],
+)
+def test_cli_dockerfile_inputs_applies_the_lines_files_to_the_names_on_it(
+    tmp_path, capsys, fake_pypi, a, run, expected
+):
+    path = _context(tmp_path, _ONE_LINE.format(run), ["a.txt", "b.txt", "c.txt"])
+    (tmp_path / "a.txt").write_text(a, encoding="utf-8")
+    (tmp_path / "c.txt").write_text("ranged==1.9\n", encoding="utf-8")
+    main(["--dockerfile", str(path), "--dockerfile-inputs", "--json", "--no-cache"])
+    packages = json.loads(capsys.readouterr().out)["packages"]
+    named = {p["name"]: (p["version"], p["results"]["linux-x86_64"]) for p in packages if p["name"] != "purewheel"}
+    assert named == {run.replace(" -r a.txt", "").replace("-r a.txt ", "").split("=")[0].split(">")[0]: expected}
+
+
+def test_dockerfile_requirements_keeps_the_names_of_two_installs_with_other_files_apart(tmp_path):
+    path = _context(
+        tmp_path,
+        _ONE_LINE.format("-r a.txt six==1.16.0 && pip install idna==3.10 && pip install -r a.txt certifi==1"),
+        ["a.txt", "b.txt", "c.txt"],
+    )
+    report = InputsReport()
+    dockerfile_requirements(path, report=report, line_files={})
+    assert report.named == [(4, ["six==1.16.0"], False), (4, ["idna==3.10"], False), (4, ["certifi==1"], False)]
+    assert report.named_files == [(tmp_path / "a.txt",), (), (tmp_path / "a.txt",)]
 
 
 def test_dockerfile_requirements_reads_the_files_of_one_line_together(tmp_path):
@@ -2113,6 +2159,22 @@ def test_dockerfile_requirements_refuses_a_file_read_again_with_other_options(tm
     else:
         with pytest.raises(DockerfileError, match=message):
             dockerfile_requirements(path, line_files={})
+
+
+def test_dockerfile_requirements_refuses_a_file_read_again_with_a_dependency_constraint_under_deps(tmp_path):
+    # pip 26.3: line 5 downgrades b.txt's dependency dd to the 1.0 that a.txt's -c file pins, and --deps resolves
+    # b.txt once, as line 4 reads it. Without --deps no dependency is checked, so the answer is the same.
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY a.txt b.txt c.txt ./\nRUN pip install -r b.txt\n"
+        "RUN pip install -r a.txt -r b.txt\n",
+        ["a.txt", "b.txt", "c.txt"],
+    )
+    (tmp_path / "a.txt").write_text("-c c.txt\n", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("dd==1.0\n", encoding="utf-8")
+    assert dockerfile_requirements(path, line_files={}) == [(4, tmp_path / "b.txt"), (5, tmp_path / "a.txt")]
+    with pytest.raises(DockerfileError, match=":5: b.txt is installed again with other -r files than on line 4"):
+        dockerfile_requirements(path, line_files={}, dependencies=True)
 
 
 def test_dockerfile_requirements_refuses_a_lock_beside_other_files_on_a_pip_line(tmp_path):

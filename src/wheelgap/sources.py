@@ -262,6 +262,9 @@ class Source:
     # includes), by their full names and never with their values, which may hold credentials: pip reads them and
     # wheelgap doesn't, so the CLI says the file was checked on PyPI only.
     index_options: list[str] = field(default_factory=list)
+    # The same for the other -r files of its pip install line, whose index options pip applies to it too: (the file
+    # that sets them, their names).
+    line_index_options: list[tuple[str, list[str]]] = field(default_factory=list)
     # A project directory with pixi.lock as well as the lockfile that was picked: the pixi.lock, for a note.
     passed_over: Path | None = None
     # The input was a directory: which of its files this is and why (None for a file or package names).
@@ -2451,6 +2454,7 @@ def parse_requirements(
             )
         )
     own = Path(os.path.abspath(path))
+    line_index_options: list[tuple[str, list[str]]] = []
     for file in line_files or (path,):
         if Path(os.path.abspath(file)) == own:
             pkgs.extend(
@@ -2465,19 +2469,58 @@ def parse_requirements(
                     ignored_options=ignored_options,
                 )
             )
-            continue
-        # Another file of the line: its requirements are its own source's, but its options, index options and
-        # constraints are the install's. It gets its own record of requirement files read, so a file both include
-        # still lists its packages in each; the constraints files read are shared, so none is added twice.
-        _read_requirements(
-            file,
-            {False: set(), True: seen[True]},
-            constraints,
-            index_options=index_options,
-            format_control=format_control,
-        )
-    source = _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
+        else:
+            line_index_options += _read_line_options(file, seen, constraints, format_control)
+    shared = [line for _, lines in line_index_options for line in lines]
+    source = _finalize_requirements(
+        path, pkgs, constraints, index_options + shared, format_control, req_lines, compiler_signs
+    )
+    source.index_options = _index_option_names(index_options)
+    source.line_index_options = [(name, _index_option_names(lines)) for name, lines in line_index_options]
     source.ignored_options = list(ignored_options.values())
+    return source
+
+
+def _read_line_options(
+    file: Path, seen: dict[bool, set[Path]], constraints: list[Package], format_control: _FormatControl
+) -> list[tuple[str, list[str]]]:
+    """Read another -r file of a pip install line for what it sets for the whole install: its options into
+    `format_control`, its -c lines into `constraints`, and (returned) its index option lines, as (its name, lines).
+    Its requirements are its own source's. It gets its own record of requirement files read, so a file both include
+    still lists its packages in each; the constraints files read are shared (`seen`), so none is added twice."""
+    index_options: list[str] = []
+    _read_requirements(
+        file,
+        {False: set(), True: seen[True]},
+        constraints,
+        index_options=index_options,
+        format_control=format_control,
+    )
+    return [(file.name, index_options)] if index_options else []
+
+
+def parse_named_requirements(label: str, names: list[str], line_files: tuple[Path, ...]) -> Source:
+    """Requirements named on a pip install line (`pip install -r a.txt fastlib==2.0.0`), with what the line's -r and -c
+    files set for the whole install, as pip reads them with one finder (pip 26.3: --no-binary :all: in a.txt leaves
+    fastlib no wheel, in either order): the option lines, the -c lines inside them, and their index options. (A -c
+    FILE beside names on the line isn't read: dockerfile_requirements refuses it.)"""
+    constraints: list[Package] = []
+    seen: dict[bool, set[Path]] = {False: set(), True: set()}
+    format_control = _FormatControl()
+    line_index_options: list[tuple[str, list[str]]] = []
+    for file in line_files:
+        line_index_options += _read_line_options(file, seen, constraints, format_control)
+    pkgs = [requirement_to_package(name, label) for name in names]
+    shared = [line for _, lines in line_index_options for line in lines]
+    read = _finalize_requirements(Path(label), pkgs, constraints, shared, format_control, [], [])
+    source = Source(label, read.packages, pypi_only=not shared)
+    source.specs = list(names)
+    source.line_index_options = [(name, _index_option_names(lines)) for name, lines in line_index_options]
+    source.format_control = read.format_control
+    source.constraint_specs = read.constraint_specs
+    source.marker_constraint_specs = read.marker_constraint_specs
+    source.constraint_errors = read.constraint_errors
+    source.deps_blockers = read.deps_blockers
     return source
 
 

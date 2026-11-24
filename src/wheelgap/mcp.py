@@ -374,9 +374,10 @@ TOOLS: list[dict[str, Any]] = [
             "wheelgap can't read the way Docker does is a tool error saying what to pass "
             "instead. With inputs: true, as --dockerfile-inputs does, it checks the requirements files the "
             "Dockerfile's final stage installs with RUN pip install -r FILE instead of a lockfile (so: will this "
-            "image build without compiling anything?); 'path' is then the build context, and notes name each file "
-            "read and its line. Only a strict subset of Dockerfiles is read that way: a line that may install "
-            "anything else is a tool error naming the line, never a guess. A line wheelgap can't see into (a script, "
+            "image build without compiling anything?); 'path' is then the build context, and notes (and "
+            "'dockerfile_inputs') name each file read and its line. Only a strict subset of Dockerfiles is read "
+            "that way: a line that may install anything else is a tool error naming the line, never a guess. A line "
+            "wheelgap can't see into (a script, "
             "make) after the last install it reads is listed in 'dockerfile_warnings', with summary.complete false: "
             "the packages it installs are not in the answer, so say so rather than calling the image fine. "
             + _FIX_HELP
@@ -1187,10 +1188,11 @@ def _run_cli(
         for line in err.getvalue().splitlines()
         if line.strip()
     ]
-    notes = [m.removeprefix("note: ") for m in messages if m.startswith("note: ")]
+    # A warning qualifies the answer (--dockerfile-inputs: a line wheelgap can't see into), so it is kept, marked.
+    notes = [m.removeprefix("note: ") for m in messages if m.startswith(("note: ", "warning: "))]
     # SystemExit is a BaseException: without the handler above it would end the server, not just this call.
     if code not in (0, 1):
-        errors = [m.removeprefix("error: ") for m in messages if not m.startswith("note: ")]
+        errors = [m.removeprefix("error: ") for m in messages if not m.startswith(("note: ", "warning: "))]
         # An indented line continues the error above it (the files a directory leaves to choose from): it stays a
         # line of its own.
         text = "".join(("\n" if m.startswith(" ") else "; ") + m for m in errors).removeprefix("; ")
@@ -1252,6 +1254,13 @@ def _run_cli(
         "ignored_targets": data["ignored_targets"],
         "notes": notes,
     } | ({"blocking_newer_python": data["blocking_newer_python"]} if "blocking_newer_python" in data else {})
+    # --dockerfile-inputs: the files each RUN line read, the lines wheelgap couldn't see into, and whether the answer
+    # covers every line (summary.complete), as --json gives them.
+    for key in ("dockerfile_inputs", "dockerfile_warnings"):
+        if key in data:
+            result[key] = data[key]
+    if "complete" in data["summary"]:
+        result["summary"] = {"complete": data["summary"]["complete"]}
     # --dist: targets the previous release had a wheel for that this one drops, labelled like results.
     if "dropped" in data:
         result["dropped"] = {label[k]: v for k, v in data["dropped"].items()}

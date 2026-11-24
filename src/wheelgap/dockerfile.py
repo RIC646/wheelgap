@@ -2054,6 +2054,33 @@ _PROGRAMS = frozenset(
     "ninja java javac mvn gradle dotnet ruby gem bundle composer php openssl ssh-keygen ssh-keyscan jq envsubst strip "
     "ldd pkg-config autoreconf autoconf automake playwright".split()
 )
+# Of those, the spellings that run the project's own code (#684): a package.json script (`npm run setup`, `yarn build`,
+# `pnpm start`), a package's bin (`npx`, `bunx`, `pnpm dlx`), a script file (`node setup.js`, `deno run`, `go run`,
+# `cargo run`, `cmake -P`). Any of them may run `pip install`. Before an install they are passed over with a note that
+# says what is trusted; after the last install read they are warnings, as a script is (_project_script).
+_NPM_SCRIPT_COMMANDS = frozenset("run run-script rum urn start test t tst restart stop exec x".split())
+_GO_SCRIPT_COMMANDS = frozenset("run generate test".split())
+_CARGO_SCRIPT_COMMANDS = frozenset("run test bench".split())
+# yarn, pnpm, bun and deno run a script or file by its name (`yarn build`, `pnpm lint`, `bun x.ts`, `deno main.ts`), so
+# only their other commands, which install or inspect, are plain programs.
+_RUNNER_COMMANDS = {
+    "yarn": frozenset(
+        "install add remove upgrade up cache config info why list audit init set pack publish version outdated "
+        "dedupe licenses login logout npm constraints bin global".split()
+    ),
+    "pnpm": frozenset(
+        "install i add remove rm uninstall un update up upgrade fetch store config c prune list ls why outdated "
+        "audit pack publish init import link ln unlink root bin env setup licenses deploy".split()
+    ),
+    "bun": frozenset(
+        "install i add a remove rm update upgrade pm link unlink outdated init build patch publish audit info".split()
+    ),
+    "deno": frozenset(
+        "install i add remove uninstall cache fmt lint check info doc compile upgrade outdated types coverage clean "
+        "completions init publish vendor".split()
+    ),
+}
+_NODE_PROBES = frozenset("-v --version -h --help".split())
 # Tools that install Python packages in ways --dockerfile-inputs doesn't read: a line running one is an error.
 _INSTALLERS = frozenset(
     "poetry pdm pipenv conda mamba micromamba pipx easy_install hatch pixi rye uvx pip-sync flit".split()
@@ -2075,6 +2102,7 @@ PASSED_OVER = {
     "system-packages": "system package and account commands",
     "shell": "shell and file commands",
     "programs": "other programs",
+    "project-scripts": "programs that run the project's own scripts",
     "venv": "virtual environment set-up",
     "cache-mounts": "cache mounts",
     "copy-from": "files copied from another stage or image",
@@ -2184,6 +2212,10 @@ class InputsReport:
     # PASSED_OVER, and "installer-tools").
     passed_over: dict[str, list[int]] = field(default_factory=dict)
     programs: list[str] = field(default_factory=list)  # the programs of the "programs" class, in order
+    script_programs: list[str] = field(default_factory=list)  # the spellings of the "project-scripts" class, in order
+    # (line, spelling, what it runs, len(warnings), len(unseen)) for each command that runs the project's own scripts
+    # (_project_script), in order: a warning, at that place, if it comes after the last install read, else passed over.
+    scripts: list[tuple[int, str, str, int, int]] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)  # what the "installer-tools" lines install
     # (line, what it runs) for lines that may install Python packages wheelgap can't see: a script, make, a program
     # it doesn't know. The answer doesn't cover them, and the caller must say so where it can't be missed.
@@ -2229,6 +2261,32 @@ class _Install:
     module: bool = False  # `python -m pip`, which imports from the working folder first
     created: int = 0  # how many of the reader's `created` come before it
     no_deps: bool = False
+    scripts: int = 0  # how many commands that run the project's own scripts come before it (InputsReport.scripts)
+
+
+def _project_script(base: str, texts: list[str]) -> str | None:
+    """How this command runs the project's own code (`npm run`, `npx`, `cmake -P`), or None if it doesn't. Where an
+    option's value may stand before the command word (`npm --prefix web run build`, `go -C app run .`), any word
+    counts, so a doubtful command is a script: a warning after the last install, never a pass."""
+    if base == "corepack" and texts and texts[0] in ("npm", "npx", "yarn", "pnpm"):
+        return _project_script(texts[0], texts[1:])
+    words = [text for text in (texts[: texts.index("--")] if "--" in texts else texts) if not text.startswith("-")]
+    if base in ("npx", "bunx"):
+        return base
+    for program, commands in (
+        ("npm", _NPM_SCRIPT_COMMANDS),
+        ("go", _GO_SCRIPT_COMMANDS),
+        ("cargo", _CARGO_SCRIPT_COMMANDS),
+    ):
+        if base == program and (command := next((word for word in words if word in commands), None)):
+            return f"{program} {command}"
+    if base in _RUNNER_COMMANDS and words and words[0] not in _RUNNER_COMMANDS[base]:
+        return f"{base} {words[0]}"
+    if base == "node" and not all(text in _NODE_PROBES for text in texts):
+        return "node"
+    if base == "cmake" and "-P" in texts:
+        return "cmake -P"
+    return None
 
 
 def _requirement_name(text: str) -> str | None:
@@ -2456,6 +2514,7 @@ class _RunReader:
                         )
                         self.report.notes.append((number, "arg-value", f"this install uses {how}"))
                 detail.unseen, detail.mounts = len(self.report.unseen), tuple(covered)
+                detail.scripts = len(self.report.scripts)
                 detail.created = len(self.created)
                 if unknown_mount:
                     stop(f"{unknown_mount}, and it may hide the requirements file or put a pip config file in place")
@@ -2466,6 +2525,10 @@ class _RunReader:
             elif kind == "warning":
                 assert isinstance(detail, str)
                 self.report.warn(number, detail)
+            elif kind == "project-scripts":
+                assert isinstance(detail, tuple)
+                spelling, what = detail
+                self.report.scripts.append((number, spelling, what, len(self.report.warnings), len(self.report.unseen)))
             elif kind == "installer-tools":
                 self.report.passed(kind, number)
                 self.report.tools += [name for name in str(detail).split() if name not in self.report.tools]
@@ -2810,6 +2873,8 @@ class _RunReader:
             return "system-packages", ""
         if base in _SHELL_COMMANDS or base == "find":
             return "shell", ""
+        if spelling := _project_script(base, [word.text for word in args]):
+            return "project-scripts", (spelling, f"`{shown}`, which runs scripts wheelgap can't see into")
         if base in _PROGRAMS:
             return "programs", base
         return "warning", f"`{shown}`, a program wheelgap doesn't know"
@@ -3365,7 +3430,11 @@ def _dockerfile_requirements(
     env_names: set[str] = set()  # the names an ENV set
     global_defaults = global_args.defaults if not global_args.unreadable else {}
 
+    scripts_before_last = 0  # InputsReport.scripts that come before the last install read
+
     def read_install(install: _Install) -> None:
+        nonlocal scripts_before_last
+        scripts_before_last = install.scripts
         if run_error:
             raise DockerfileError(run_error)
         if reader.config_error:
@@ -3697,6 +3766,16 @@ def _dockerfile_requirements(
                 number, instruction, args, env, workdir, workdir_error, uv_system, arg_values, bash, body
             ):
                 read_install(install)
+    # A command that runs the project's own scripts may run pip: before an install it is trusted not to, as #657
+    # decided (stopping at every `npm ci && npm run build` would refuse most full-stack Dockerfiles), and after the last
+    # install it is a warning in its place, as a script is.
+    for line, spelling, _, _, _ in report.scripts[:scripts_before_last]:
+        report.passed("project-scripts", line)
+        if spelling not in report.script_programs:
+            report.script_programs.append(spelling)
+    for line, _, what, warnings_at, unseen_at in reversed(report.scripts[scripts_before_last:]):
+        report.warnings.insert(warnings_at, (line, what))
+        report.unseen.insert(unseen_at, (line, f"runs {what}"))
     # A system package installed after the last install can't be one pip keeps instead of fetching.
     del report.system_python[reader.system_before :]
     if not found and not report.named:

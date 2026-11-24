@@ -1186,12 +1186,16 @@ def dockerfile_report_notes(
         if lines := report.passed_over.get(kind):
             if kind == "programs":
                 what += f" ({', '.join(report.programs)})"
-            # A copy from another stage isn't known to hold no packages: it is only not followed.
-            why = (
-                "not followed"
-                if kind == "copy-from"
-                else "not read, since they install no Python packages with pip or uv"
-            )
+            if kind == "project-scripts":
+                what += f" ({', '.join(report.script_programs)})"
+            # A copy from another stage isn't known to hold no packages: it is only not followed. A project's script
+            # may run pip: it is only trusted not to, before an install (after the last one it is a warning).
+            if kind == "copy-from":
+                why = "not followed"
+            elif kind == "project-scripts":
+                why = "passed over, trusted not to install Python packages"
+            else:
+                why = "not read, since they install no Python packages with pip or uv"
             notes.append(
                 {
                     "dockerfile": dockerfile,

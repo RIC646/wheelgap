@@ -329,15 +329,19 @@ class Fixes:
 def add_fixes(report: Report, rows: list[Row], sources: list[Source], targets: list[Target]) -> Fixes:
     """Add `fix` (fix.to_json, as `wheelgap NEW --fix --json` has it) to each target entry of `worse` and `new` that
     is a `source` or `missing` gap, and return the cells. The lookups and the plan are --fix's own (cli.release_lookups,
-    cli.gap_wheel_fills, fix.plan) on the NEW lockfile's rows, for the packages the report lists only; a name either
-    lockfile doesn't place on PyPI is kept private, as with two inputs to the main command."""
+    cli.gap_wheel_fills, fix.plan) on the NEW lockfile's rows, for the packages the report lists only, with names
+    judged by the NEW input alone, as `wheelgap NEW --fix` judges them."""
     multi_py = len({t.python for t in targets}) > 1
     entries = {canonicalize_name(e["name"]): e for e in report.worse + report.new}
     listed = [r for r in rows if not r.ok and canonicalize_name(r.package.name) in entries]
     if not listed:
         return Fixes([], [], {}, {})
-    fills = gap_wheel_fills(listed, targets, sources, None, "--index-url", False)
-    upgrades, not_looked_up = release_lookups(listed, targets, sources, None, False, flag="--fix")
+    # The rows are the NEW input's, so only it decides which names are PyPI's, as with `wheelgap NEW --fix`: the OLD
+    # side is an earlier copy of the same file, not another input of the run, and a REF:PATH copy (always pypi_only
+    # False) would otherwise keep every name it shares with NEW in, though NEW places it on PyPI.
+    new_side = sources[-1:]
+    fills = gap_wheel_fills(listed, targets, new_side, None, "--index-url", False)
+    upgrades, not_looked_up = release_lookups(listed, targets, new_side, None, False, flag="--fix")
     source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
     cells = []
     for cell in fix.plan(listed, targets, source_of, upgrades, fills, not_looked_up):
@@ -351,7 +355,7 @@ def add_fixes(report: Report, rows: list[Row], sources: list[Source], targets: l
         cells.append(cell)
     shown = {(id(c.row), c.target) for c in cells}
     fills = [f for f in fills if (id(f.row), f.target) in shown]
-    return Fixes(cells, fills, not_looked_up, explain_issues_urls([c.row for c in cells], sources))
+    return Fixes(cells, fills, not_looked_up, explain_issues_urls([c.row for c in cells], new_side))
 
 
 def fix_text(fixes: Fixes, targets: list[Target]) -> list[str]:
@@ -689,7 +693,8 @@ def _main(argv: list[str] | None, prog: str) -> int:
                 for side in entry["targets"].values():
                     side.pop("fix", None)
     if args.json:
-        if os.environ.get("_WHEELGAP_ACTION_SUGGEST") == "1":
+        # The comment's release hints say what the Fix column already does, so they're only for a run without --fix.
+        if os.environ.get("_WHEELGAP_ACTION_SUGGEST") == "1" and fixes is None:
             try:
                 add_comment_suggestions(report, rows, sources, targets)
             except Exception:

@@ -232,8 +232,9 @@ def test_the_fix_goes_to_the_summary_and_the_comment(run):
     listing = json.dumps([mine(9, MARK + "\nOld body")])
     r = run(WHEELGAP_FIX="TRUE", STUB_RELEASES="1", WHEELGAP_COMMENT="true", GH_COMMENTS=listing)
     assert r["code"] == 1, r["log"]
-    # armlib's releases (twice: --fix, then the comment's suggestions), nativeext's, and the gap wheel list.
-    assert sorted(set(r["pypi"])) == [
+    # armlib's releases (once: the Fix column replaces the comment's suggestions), nativeext's, and the gap wheel list.
+    assert "has wheels for musl-aarch64" not in r["body"]
+    assert sorted(r["pypi"]) == [
         "https://pypi.org/pypi/armlib/json",
         "https://pypi.org/pypi/nativeext/json",
         "https://wheelgap.github.io/wheels/data/gap-wheels.json",

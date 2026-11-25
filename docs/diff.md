@@ -84,9 +84,10 @@ as a new package rather than as the one it replaced.
 
 **After 0.14.0**, `--fix` adds each listed gap's way out: what [`wheelgap NEW --fix`](cli.md#fix) says for that
 package and target, an upgrade to the nearest newer official release with the wheel first, else an unofficial gap
-wheel, else none and why. Only the packages the report lists are looked up, on PyPI, and only names both inputs
-positively place there (a requirements file read from a `REF:PATH` doesn't, so a package already in it isn't looked
-up), so an unchanged gap costs nothing. The text
+wheel, else none and why. Only the packages the report lists are looked up, on PyPI, so an unchanged gap costs
+nothing, and names are judged as `wheelgap NEW --fix` judges them, by the NEW input
+([which names leave the run](how-it-works.md#pypi-origin)); a NEW given as `REF:PATH` sends a name only when its lock
+records the PyPI index (a `uv.lock`, say), so a requirements file read that way is never looked up. The text
 report ends with `--fix`'s section for those gaps, and `--json` adds a `fix` to each `source` or `missing` cell in
 `worse` and `new`, and a `fix_summary`, both as the main command's `--json --fix` has them. Like the main command's,
 it never changes the exit code. The GitHub Action's [pull request gate](ci.md#pr-gate) puts these fixes in its comment.

@@ -87,7 +87,7 @@ jobs:
   were. The token is only sent to the `https://` host in `GITHUB_SERVER_URL` (GitHub Enterprise Server included); if
   that isn't an `https://` URL, no comment is posted and the step warns. Package names and versions come from the pull
   request, so they're escaped and can't add links, @mentions or Markdown to the comment.
-- **Release suggestions.** The comment also includes the [release suggestions](output.md#suggest) for packages that got worse:
+- **Release suggestions.** With `fix: false` (**after 0.14.0**; before it, always), the comment also includes the [release suggestions](output.md#suggest) for packages that got worse:
   the nearest newer version that restores the wheels, or the last older version that had them. Lookups are limited to
   packages known to come from PyPI. If a lookup fails, the comment still reports the gap and the check's result is unchanged.
 - **Permissions.** Commenting needs `pull-requests: write` for the token (`github-token`, by default the workflow's
@@ -136,7 +136,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: wheelgap/wheelgap@v0.14.0  # or pin the release's full commit SHA, with the version in a comment
+      # The fix input needs the release after 0.14.0: until then, pin a commit of main by its full SHA.
+      - uses: wheelgap/wheelgap@v0.14.0
         with:
           args: uv.lock -p 3.13 -p 3.15 -t linux-x86_64,linux-aarch64,win-arm64
           compare-to: base
@@ -153,11 +154,11 @@ On each run of a pull request:
   gap's way out exactly as [`wheelgap uv.lock --fix`](cli.md#fix) would for the pull request's lockfile: an upgrade to
   the nearest newer official release with the wheel first (with what to run, and whether your own requirement allows
   it), else an unofficial wheel from wheelgap's [gap wheel index](https://wheelgap.github.io/wheels/), else none and
-  why. It looks only the listed packages up on PyPI, and only names both lockfiles positively place on PyPI, and reads
-  the gap wheel list in one request that names no package. A `uv.lock` records each package's index, so that covers
-  all of them; the base branch's copy of a requirements file, read from git, doesn't say, so a package already in it
-  isn't looked up (its fix says so) while a new one is. A lookup that fails says so in the log and leaves the result
-  alone; `fix: false` looks nothing up.
+  why. It looks only the listed packages up on PyPI, judging names as `--fix` does for the pull request's lockfile
+  ([which names leave the run](how-it-works.md#pypi-origin)), and reads the gap wheel list in one request that names
+  no package. A lookup that fails says so in the log and leaves the result alone; `fix: false` looks nothing up.
+  The comment's older release hints ([above](#compare-to)) are left out when `fix` is on, since the Fix column says
+  the same.
 - **One comment, edited in place.** The first run that finds something worse posts one comment; every later run edits
   that comment, never posting another. When a later push fixes it, the comment is edited to say
   **Resolved.** When nothing got worse and there's no comment yet, nothing is posted.

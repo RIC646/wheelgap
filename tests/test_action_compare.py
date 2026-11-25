@@ -671,3 +671,30 @@ def test_the_workflows_pyyaml_fixtures(monkeypatch, fake_pypi, capsys):
     assert [(f["kind"], f["version"]) for f in fixes] == [("upgrade", "6.0.4")] * 2
     text = ac.report(data, "", "action-compare-test/uv.lock", "1a2b3c4")
     assert "<td><code>win-arm64</code></td><td>(new) → ● source</td><td>upgrade to <code>6&#46;0&#46;4</code>" in text
+
+
+def test_diff_fix_for_a_bumped_requirements_pin_from_git(fake_pypi, gap_wheels, capsys, monkeypatch, tmp_path):
+    # The Dependabot case: the base copy of requirements.txt comes from git (which can't place a name on PyPI), the
+    # pull request moves an existing pin. The fix is still what `wheelgap requirements.txt --fix` says.
+    monkeypatch.setitem(
+        FAKE_INDEX,
+        "armlib",
+        {
+            "1.4.0": ["armlib-1.4.0-cp313-cp313-manylinux_2_17_x86_64.whl"],
+            "1.5.0": ["armlib-1.5.0.tar.gz"],
+            "1.6.0": ["armlib-1.6.0-cp313-cp313-manylinux_2_17_x86_64.whl"],
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q"], check=True)
+    (tmp_path / "requirements.txt").write_text("armlib==1.4.0\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    (tmp_path / "requirements.txt").write_text("armlib==1.5.0\n")
+    args = ["-p", "3.13", "-t", "linux-x86_64", "--fix", "--json"]
+    assert diff_main(["HEAD:./requirements.txt", "requirements.txt", *args]) == 1
+    got = json.loads(capsys.readouterr().out)["worse"][0]["targets"]["linux-x86_64"]["fix"]
+    assert cli_main(["requirements.txt", *args[:-2], "--fix", "--json"]) == 1
+    main = json.loads(capsys.readouterr().out)["packages"][0]["fix"]["linux-x86_64"]
+    assert got == main and got["kind"] == "upgrade" and got["version"] == "1.6.0"
